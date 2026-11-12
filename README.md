@@ -45,14 +45,15 @@ All art is optional. Drop files into `web/public/` with the names in
 | Energy | 5 every turn, does not carry over |
 | Cards per turn | 0, 1 or 2, total cost ≤ 5 |
 | Selection | Simultaneous and hidden; revealed together once both are locked |
-| Decks | Identical 20-card composition, separate independently shuffled copies |
-| Draw (both ≤ 0 HP) | Recorded as `DRAW`, settled as a **human loss** (house rule) |
+| Decks | Identical 22-card composition, separate independently shuffled copies |
+| **Deck-out defeat** | At the End phase, a player with **1 or fewer cards left in their draw pile loses** |
+| Draw (both defeated the same turn — by HP, deck-out, or one of each) | Recorded as `DRAW`, settled as a **human loss** (house rule) |
 
 **Block only stops Attack damage.** All incoming Attack damage in a turn is summed into one
 pool and the target's Block is subtracted once (`max(0, attack − block)`), so card order never
 matters. Spell damage, Poison, and reflected damage ignore Block. Block expires at end of turn.
 
-### Cards (deck-v1)
+### Cards (deck-v2)
 
 | Card | Type | Cost | Effect | In deck |
 | --- | --- | --- | --- | --- |
@@ -67,6 +68,7 @@ matters. Spell damage, Poison, and reflected damage ignore Block. Block expires 
 | Arcane Bolt | Spell | 3 | 5 Spell damage | 1 |
 | Regeneration | Spell | 2 | Heal 2 at End phase, 3 turns | 1 |
 | Disruption | Spell | 3 | Opponent discards 2 random cards (caster doesn't see which) | 1 |
+| Arcane Insight | Spell | 1 | Draw 2 cards (after Disruption; respects the 7-card hand limit; opponent only sees the count) | 2 |
 | Unstoppable | Spell | 2 | Your Attack damage this turn is unblockable | 1 |
 | Reflection | Spell | 3 | This turn, HP damage you take from cards is dealt back | 1 |
 | Lifesteal | Spell | 2 | This turn + next, heal for HP damage your cards deal | 1 |
@@ -79,9 +81,9 @@ Values live in `server/src/engine/cards.ts` and `server/src/engine/rules.ts`.
 2. **Planning** — the AI locks its choice first (from its own view only); the human then locks or passes. Timer: 60 s, then auto-pass.
 3. **Reveal + resolution** (both sides from the same snapshot):
    1. re-validate both selections · 2. consume cards & energy · 3. Block and flags (Unstoppable, Reflection, Lifesteal, Regeneration) ·
-   4. random discard (Disruption) from the *remaining* hand — committed cards can't be invalidated ·
+   4. random discard (Disruption) from the *remaining* hand — committed cards can't be invalidated · 4b. card draw (Arcane Insight) ·
    5–7. shared Attack pool vs Block (unblockable if Unstoppable), apply Poison · 8. Spell damage ·
-   9. Reflection, then Lifesteal (from actual HP damage) · 10. Regeneration · 11. Poison ticks · 12. expire Block/statuses · 13. outcome.
+   9. Reflection, then Lifesteal (from actual HP damage) · 10. Regeneration · 11. Poison ticks · 12. expire Block/statuses · 13. outcome — a side is defeated if HP ≤ 0 **or** its draw pile has ≤ 1 card.
 4. Both sides' committed effects always resolve, even if someone hits 0 HP mid-turn.
 
 ## Proposed defaults (spec left these open)
@@ -91,15 +93,15 @@ These are deliberate choices, centralised so the product owner can change them:
 | Topic | Default | Where |
 | --- | --- | --- |
 | Turn-1 draw | Yes — turn 1 starts with 6 cards in hand | `engine.ts` `startPhase` |
-| Deck size / list | 20 cards as above | `cards.ts` `DECK_COMPOSITION` |
-| Empty deck | Draw skipped, no fatigue | `engine.ts` |
+| Deck size / list | 22 cards as above | `cards.ts` `DECK_COMPOSITION` |
+| Deck-out threshold | ≤ 1 card at the End phase = defeat (`RULES.deckOutThreshold`) | `rules.ts` |
 | Hand overflow | Draw skipped (card stays in deck), shown in UI | `engine.ts` |
 | Poison | 1 dmg/tick, 3 End phases incl. the turn applied; reapply refreshes, never stacks | `rules.ts` |
 | Durations | `duration` counts the current turn; decremented in End phase | `engine.ts` |
 | Reflection | Reflects actual HP damage from Attack+Spell cards; ignores Block; cannot be re-reflected; doesn't reflect Poison | `engine.ts` |
 | Lifesteal | Heals actual HP damage dealt by own Attack+Spell cards; not Poison/Reflect | `engine.ts` |
 | Healing vs lethal | Healing cannot revive a player whose HP is ≤ 0 after damage | `engine.ts` `heal` |
-| Turn limit | 30 turns; then higher HP wins, equal HP = DRAW | `rules.ts` |
+| Turn limit | 30 turns; then higher HP wins, equal HP = DRAW (effectively unreachable now — deck-out ends matches first) | `rules.ts` |
 | Timeout | Human auto-passes after 60 s | `rules.ts`, `session.ts` |
 | Spell costs | Regeneration 2, Disruption 3, Unstoppable 2, Reflection 3, Lifesteal 2, Arcane Bolt 3 | `cards.ts` |
 | Public counts | Hand size, deck remaining and discard count are public (never identities/order) | `projection.ts` |
@@ -148,6 +150,10 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 - Matches are in memory; a server restart loses them. No accounts, no wallet, no stakes.
 - The AI is a simple heuristic (`heuristic-v1`) with small private-RNG tie-breaking; it's not tuned.
 - Balance is untested: flat 5 energy means Meteor Impact is playable from turn 1.
+- **Deck-out dominates.** Both decks shrink 1/turn in lockstep, so unless a draw spell or a skipped (hand-full)
+  draw makes them differ, both sides deck out on the same End phase → DRAW → human loss. In a 2,000-match
+  AI-vs-AI simulation: ~84% of matches ended by deck-out, ~40% were draws (avg ~12 turns). Consider a tiebreak
+  (e.g. higher HP wins a mutual deck-out) before real stakes.
 - Timing side-channels are reduced (AI commits at turn start) but not formally analysed.
 
 ## Roadmap

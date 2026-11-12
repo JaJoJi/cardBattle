@@ -35,6 +35,8 @@ export function ReportLines({ report }: { report: TurnReportView }) {
           {NAME[h.target]}: +{h.amount} HP ({h.source === "LIFESTEAL" ? "Lifesteal" : "Regen"})
         </li>
       ))}
+      {report.youDrew.length > 0 && <li className="line line--draw">You drew {report.youDrew.map((c) => c.def.name).join(", ")}</li>}
+      {report.opponentDrewCount > 0 && <li className="line line--draw">AI drew {report.opponentDrewCount} card(s)</li>}
       {report.youLost.length > 0 && <li className="line line--discard">Disruption discarded your {report.youLost.map((c) => c.def.name).join(", ")}</li>}
       {report.opponentLostCount > 0 && <li className="line line--discard">Your Disruption discarded {report.opponentLostCount} hidden AI card(s)</li>}
       {report.damage.length === 0 && report.heals.length === 0 && <li className="line muted">No damage</li>}

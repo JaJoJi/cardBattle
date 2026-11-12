@@ -60,9 +60,21 @@ describe("hidden information", () => {
     const r = resolveTurn(s, rng());
     const human = projectFor(s, "HUMAN");
     expect(human.lastTurn!.opponentLostCount).toBe(2);
-    for (const uid of r.discarded.AI) expect(JSON.stringify(human)).not.toContain(uid);
+    for (const uid of r.discarded.AI) expect(JSON.stringify(human)).not.toContain(`"${uid}"`);
     const ai = projectFor(s, "AI");
     expect(ai.lastTurn!.youLost.map((c) => c.uid)).toEqual(r.discarded.AI);
+  });
+
+  it("only the caster sees which cards Arcane Insight drew", () => {
+    const deck = Array.from({ length: 10 }, (_, i) => `heavy_strike#${i + 1}`);
+    const s = makeState({ hand: ["arcane_insight#1"], deck }, {});
+    commitSelection(s, "HUMAN", ["arcane_insight#1"]);
+    commitSelection(s, "AI", []);
+    const r = resolveTurn(s, rng());
+    expect(projectFor(s, "HUMAN").lastTurn!.youDrew.map((c) => c.uid)).toEqual(r.drawn.HUMAN);
+    const ai = projectFor(s, "AI");
+    expect(ai.lastTurn!.opponentDrewCount).toBe(2);
+    for (const uid of r.drawn.HUMAN) expect(JSON.stringify(ai)).not.toContain(`"${uid}"`);
   });
 
   it("played cards are revealed to both sides after resolution", () => {
@@ -93,6 +105,14 @@ describe("hidden information", () => {
     const pickB = chooseCards(projectFor(b, "AI"), createSeededRng(Buffer.from("x")));
     expect(pickA).toEqual(pickB);
     expect(commitSelection(a, "AI", pickA).ok).toBe(true);
+  });
+});
+
+describe("AI and deck-out", () => {
+  it("never plays a draw spell that would deck itself out", () => {
+    const s = makeState({}, { hand: ["arcane_insight#1"], deck: ["fortify#1", "fortify#2", "fortify#3"] });
+    const pick = chooseCards(projectFor(s, "AI"), createSeededRng(Buffer.from("x")));
+    expect(pick).not.toContain("arcane_insight#1");
   });
 });
 

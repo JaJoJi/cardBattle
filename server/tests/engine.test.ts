@@ -39,11 +39,6 @@ describe("setup and turn rules", () => {
     expect(s.players.HUMAN.lastDraw).toBe("HAND_FULL");
   });
 
-  it("empty deck skips the draw", () => {
-    const s = makeState({ hand: [] , deck: [] });
-    play(s, [], []);
-    expect(s.players.HUMAN.lastDraw).toBe("DECK_EMPTY");
-  });
 
   it("separate deck seeds produce independently shuffled decks of identical composition", () => {
     const s = match();
@@ -228,6 +223,87 @@ describe("damage and defense", () => {
     const s = makeState({ hand: ["disruption#1"] }, { hand: ["fortify#1"] });
     const r = play(s, ["disruption#1"], []);
     expect(r.discarded.AI).toEqual(["fortify#1"]);
+  });
+});
+
+describe("draw spell", () => {
+  const deck = (n: number) => Array.from({ length: n }, (_, i) => `fortify#${i + 1}`);
+
+  it("Arcane Insight draws 2 cards into the caster's hand", () => {
+    const s = makeState({ hand: ["arcane_insight#1"], deck: deck(10) });
+    const r = play(s, ["arcane_insight#1"], []);
+    expect(r.drawn.HUMAN).toEqual(["fortify#1", "fortify#2"]);
+    // + start-phase draw of the next turn
+    expect(s.players.HUMAN.hand).toEqual(["fortify#1", "fortify#2", "fortify#3"]);
+    expect(s.players.HUMAN.drawIndex).toBe(3);
+  });
+
+  it("respects the 7-card hand limit; skipped draws stay in the deck", () => {
+    const hand = ["arcane_insight#1", "quick_strike#1", "quick_strike#2", "quick_strike#3", "quick_strike#4", "quick_strike#5", "quick_strike#6"];
+    const s = makeState({ hand, deck: deck(10) });
+    const r = play(s, ["arcane_insight#1"], []);
+    expect(r.drawn.HUMAN).toEqual(["fortify#1"]);
+    expect(s.players.HUMAN.drawIndex).toBe(1);
+  });
+
+  it("Disruption cannot discard cards drawn by Arcane Insight the same turn", () => {
+    const s = makeState({ hand: ["disruption#1"] }, { hand: ["arcane_insight#1"], deck: deck(10) });
+    const r = play(s, ["disruption#1"], ["arcane_insight#1"]);
+    expect(r.discarded.AI).toEqual([]);
+    expect(r.drawn.AI).toHaveLength(2);
+  });
+});
+
+describe("deck-out defeat (End phase)", () => {
+  const deck = (n: number) => Array.from({ length: n }, (_, i) => `fortify#${i + 1}`);
+
+  it("a player with 1 card left in their deck at the End phase loses", () => {
+    const s = makeState({ deck: deck(1) }, { deck: deck(10) });
+    play(s, [], []);
+    expect(s.phase).toBe("FINISHED");
+    expect(s.outcome).toBe("AI");
+    expect(s.lossReasons).toEqual({ HUMAN: ["DECK_OUT"], AI: [] });
+  });
+
+  it("an empty deck also loses", () => {
+    const s = makeState({}, { deck: [] });
+    play(s, [], []);
+    expect(s.outcome).toBe("HUMAN");
+    expect(s.settlement).toBe("HUMAN_WIN");
+  });
+
+  it("2 cards left is safe", () => {
+    const s = makeState({ deck: deck(2) }, { deck: deck(2) });
+    play(s, [], []);
+    expect(s.phase).toBe("PLANNING");
+    expect(s.players.HUMAN.drawIndex).toBe(1); // next turn's draw happened → 1 left, checked at that End phase
+  });
+
+  it("drawing yourself down to 1 with Arcane Insight loses", () => {
+    const s = makeState({ hand: ["arcane_insight#1"], deck: deck(3) }, { deck: deck(10) });
+    play(s, ["arcane_insight#1"], []);
+    expect(s.outcome).toBe("AI");
+    expect(s.lossReasons!.HUMAN).toEqual(["DECK_OUT"]);
+  });
+
+  it("both decking out on the same End phase is a DRAW settled as a human loss", () => {
+    const s = makeState({ deck: deck(1) }, { deck: deck(1) });
+    play(s, [], []);
+    expect(s.outcome).toBe("DRAW");
+    expect(s.settlement).toBe("HUMAN_LOSS");
+  });
+
+  it("one side at 0 HP and the other decked out is a DRAW", () => {
+    const s = makeState({ hand: ["meteor_impact#1"], deck: deck(1) }, { hp: 10, deck: deck(10) });
+    play(s, ["meteor_impact#1"], []);
+    expect(s.outcome).toBe("DRAW");
+    expect(s.lossReasons).toEqual({ HUMAN: ["DECK_OUT"], AI: ["HP"] });
+  });
+
+  it("deck-out is checked at the End phase, after all effects (HP loss also recorded)", () => {
+    const s = makeState({ deck: deck(1), hp: 3 }, { hand: ["heavy_strike#1"], deck: deck(10) });
+    play(s, [], ["heavy_strike#1"]);
+    expect(s.lossReasons!.HUMAN).toEqual(["HP", "DECK_OUT"]);
   });
 });
 

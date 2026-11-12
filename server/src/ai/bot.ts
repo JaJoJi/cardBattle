@@ -1,3 +1,4 @@
+import { RULES } from "../engine/rules";
 import type { Rng } from "../engine/rng";
 import type { CardView, PlayerView } from "../engine/types";
 
@@ -71,6 +72,13 @@ function scoreOption(view: PlayerView, option: CardView[]): number {
       case "LIFESTEAL":
         score += 1.5;
         break;
+      case "DRAW_CARDS": {
+        // Drawing to the deck-out threshold loses at the End phase — never do it.
+        const drawable = Math.min(e.count, RULES.maxHandSize - (self.hand.length - option.length));
+        if (self.deckRemaining - drawable <= view.deckOutThreshold) score -= 1000;
+        else score += Math.max(0, drawable) * 1.2;
+        break;
+      }
     }
   }
 

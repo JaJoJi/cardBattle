@@ -74,9 +74,13 @@ export function EnergyCrystals({ total, available, max }: { total: number; avail
   );
 }
 
-export function DeckPile({ count, label }: { count: number; label: string }) {
+export function DeckPile({ count, label, threshold }: { count: number; label: string; threshold?: number }) {
+  const danger = threshold !== undefined && count <= threshold + 2;
   return (
-    <div className="pile" title={`${label}: ${count} cards`}>
+    <div
+      className={`pile ${danger ? "pile--danger" : ""}`}
+      title={threshold !== undefined ? `${label}: ${count} cards. ${threshold} or fewer at the End phase = defeat.` : `${label}: ${count} cards`}
+    >
       <span className="pile__stack" />
       <span className="pile__count">{count}</span>
       <span className="pile__label">{label}</span>

@@ -90,7 +90,7 @@ export function VaultPage({ activeMatch, onEnter, onResume }: Props) {
         </div>
         <p className="muted small fineprint">
           Practice mode: no funds move yet. Protocol fee {MOCK_VAULT.protocolFeeBps / 100}% · a single payout is capped at{" "}
-          {MOCK_VAULT.maxPayoutShareBps / 100}% of free liquidity ({usdc(maxSinglePayout())} USDC) · draws settle as a loss.
+          {MOCK_VAULT.maxPayoutShareBps / 100}% of free liquidity ({usdc(maxSinglePayout())} USDC) · draws settle as a loss · a deck of 1 or fewer cards at the End phase is a defeat.
         </p>
       </section>
 

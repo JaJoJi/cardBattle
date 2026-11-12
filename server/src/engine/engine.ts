@@ -6,6 +6,7 @@ import type {
   DamageRecord,
   HealRecord,
   MatchState,
+  LossReason,
   PlayerState,
   Side,
   Status,
@@ -163,6 +164,7 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     played: { HUMAN: [...commits.HUMAN], AI: [...commits.AI] },
     blockGained: { HUMAN: 0, AI: 0 },
     discarded: { HUMAN: [], AI: [] },
+    drawn: { HUMAN: [], AI: [] },
     damage: [],
     heals: [],
     hpAfter: { HUMAN: 0, AI: 0 },
@@ -207,6 +209,21 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
         const [uid] = tp.hand.splice(rng.int(tp.hand.length), 1);
         tp.discard.push(uid);
         report.discarded[target].push(uid);
+      }
+    }
+  }
+
+  // 4b. Card draw spells (after discards, so Disruption cannot hit freshly drawn cards).
+  //     Respects the hand limit: excess draws are skipped and stay in the deck.
+  for (const side of SIDES) {
+    const p = state.players[side];
+    for (const { def } of defs(side)) {
+      if (def.effect.kind !== "DRAW_CARDS") continue;
+      for (let i = 0; i < def.effect.count; i++) {
+        if (p.hand.length >= RULES.maxHandSize || p.drawIndex >= p.deck.length) break;
+        const uid = p.deck[p.drawIndex++];
+        p.hand.push(uid);
+        report.drawn[side].push(uid);
       }
     }
   }
@@ -307,18 +324,31 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
   return report;
 }
 
+export const deckRemaining = (p: PlayerState) => p.deck.length - p.drawIndex;
+
+/** End-phase defeat conditions: HP ≤ 0, or draw pile at/below the deck-out threshold. */
+function lossReasonsOf(p: PlayerState): LossReason[] {
+  const reasons: LossReason[] = [];
+  if (p.hp <= 0) reasons.push("HP");
+  if (deckRemaining(p) <= RULES.deckOutThreshold) reasons.push("DECK_OUT");
+  return reasons;
+}
+
 function decideOutcome(state: MatchState): void {
-  const h = state.players.HUMAN.hp;
-  const a = state.players.AI.hp;
+  const reasons = { HUMAN: lossReasonsOf(state.players.HUMAN), AI: lossReasonsOf(state.players.AI) };
+  const humanLost = reasons.HUMAN.length > 0;
+  const aiLost = reasons.AI.length > 0;
   let outcome: MatchState["outcome"];
-  if (h <= 0 && a <= 0) outcome = "DRAW";
-  else if (a <= 0) outcome = "HUMAN";
-  else if (h <= 0) outcome = "AI";
-  else if (state.turn >= RULES.maxTurns) {
+  if (humanLost || aiLost) {
+    outcome = humanLost && aiLost ? "DRAW" : aiLost ? "HUMAN" : "AI";
+    state.endReason = "DEFEAT";
+    state.lossReasons = reasons;
+  } else if (state.turn >= RULES.maxTurns) {
+    const h = state.players.HUMAN.hp;
+    const a = state.players.AI.hp;
     outcome = h > a ? "HUMAN" : a > h ? "AI" : "DRAW";
     state.endReason = "TURN_LIMIT";
   } else return;
-  state.endReason ??= "HP";
   state.outcome = outcome;
   // A draw is recorded as DRAW but settled in the house's favour (spec §11).
   state.settlement = outcome === "HUMAN" ? "HUMAN_WIN" : "HUMAN_LOSS";

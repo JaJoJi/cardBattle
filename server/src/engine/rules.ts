@@ -11,6 +11,8 @@ export const RULES = {
   maxCardsPerTurn: 2,
   /** PROPOSED: Poison deals 1/tick for 3 End phases (incl. the turn applied); reapplying refreshes. */
   poison: { damagePerTick: 1, duration: 3 },
+  /** A player whose draw pile has this many cards or fewer at the End phase loses. */
+  deckOutThreshold: 1,
   /** PROPOSED: match ends after this turn; higher HP wins, equal HP is a DRAW. */
   maxTurns: 30,
   /** PROPOSED: human auto-passes when the planning timer expires. */

@@ -10,6 +10,7 @@ export type CardEffect =
   | { kind: "GAIN_BLOCK"; amount: number }
   | { kind: "HEAL_OVER_TIME"; amountPerTurn: number; duration: number }
   | { kind: "DISCARD_RANDOM"; count: number }
+  | { kind: "DRAW_CARDS"; count: number }
   | { kind: "UNBLOCKABLE_ATTACKS"; duration: number }
   | { kind: "REFLECT_DAMAGE"; duration: number }
   | { kind: "LIFESTEAL"; duration: number };
@@ -77,12 +78,14 @@ export interface TurnReport {
   played: Record<Side, string[]>;
   blockGained: Record<Side, number>;
   discarded: Record<Side, string[]>; // cards discarded FROM that side's hand by opponent effects
+  drawn: Record<Side, string[]>; // cards drawn by that side's own spells during resolution
   damage: DamageRecord[];
   heals: HealRecord[];
   hpAfter: Record<Side, number>;
 }
 
 export type Outcome = "HUMAN" | "AI" | "DRAW";
+export type LossReason = "HP" | "DECK_OUT";
 export type Settlement = "HUMAN_WIN" | "HUMAN_LOSS";
 
 export interface MatchState {
@@ -97,7 +100,9 @@ export interface MatchState {
   history: TurnReport[];
   outcome?: Outcome;
   settlement?: Settlement;
-  endReason?: "HP" | "TURN_LIMIT";
+  endReason?: "DEFEAT" | "TURN_LIMIT";
+  /** Why each side was defeated (empty = not defeated). Set when the match finishes by defeat. */
+  lossReasons?: Record<Side, LossReason[]>;
 }
 
 // ---------- Projections (what a given identity is allowed to see) ----------
@@ -113,6 +118,8 @@ export interface TurnReportView {
   blockGained: Record<Side, number>;
   youLost: CardView[]; // your own cards discarded by the opponent (you already knew them)
   opponentLostCount: number; // identities of the opponent's discarded cards stay hidden
+  youDrew: CardView[]; // cards your spells drew this turn
+  opponentDrewCount: number; // only the count of the opponent's spell draws
   damage: DamageRecord[];
   heals: HealRecord[];
   hpAfter: Record<Side, number>;
@@ -130,6 +137,7 @@ export interface PlayerView {
   energyPerTurn: number;
   maxCardsPerTurn: number;
   maxTurns: number;
+  deckOutThreshold: number;
   self: {
     hp: number;
     energy: number;
@@ -153,4 +161,5 @@ export interface PlayerView {
   outcome?: Outcome;
   settlement?: Settlement;
   endReason?: MatchState["endReason"];
+  lossReasons?: MatchState["lossReasons"];
 }

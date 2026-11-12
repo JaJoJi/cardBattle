@@ -26,6 +26,7 @@ export function projectFor(state: MatchState, viewer: Side, catalog: Catalog = C
     energyPerTurn: RULES.energyPerTurn,
     maxCardsPerTurn: RULES.maxCardsPerTurn,
     maxTurns: RULES.maxTurns,
+    deckOutThreshold: RULES.deckOutThreshold,
     self: {
       hp: me.hp,
       energy: me.energy,
@@ -49,6 +50,7 @@ export function projectFor(state: MatchState, viewer: Side, catalog: Catalog = C
     outcome: state.outcome,
     settlement: state.settlement,
     endReason: state.endReason,
+    lossReasons: state.lossReasons ? { HUMAN: [...state.lossReasons.HUMAN], AI: [...state.lossReasons.AI] } : undefined,
   };
 }
 
@@ -59,6 +61,8 @@ function projectReport(r: TurnReport, viewer: Side, view: (uid: string) => CardV
     blockGained: { ...r.blockGained },
     youLost: r.discarded[viewer].map(view),
     opponentLostCount: r.discarded[opponentOf(viewer)].length,
+    youDrew: r.drawn[viewer].map(view),
+    opponentDrewCount: r.drawn[opponentOf(viewer)].length,
     damage: r.damage.map((d) => ({ ...d, sourceCards: [...d.sourceCards] })),
     heals: r.heals.map((h) => ({ ...h })),
     hpAfter: { ...r.hpAfter },

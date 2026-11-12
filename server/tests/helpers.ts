@@ -28,7 +28,8 @@ function player(spec: PlayerSpec): PlayerState {
     energy: spec.energy ?? RULES.energyPerTurn,
     block: 0,
     hand: [...(spec.hand ?? [])],
-    deck: [...(spec.deck ?? ["quick_strike#9"])],
+    // Default deck is large enough that no test decks out unless it wants to.
+    deck: [...(spec.deck ?? Array.from({ length: 12 }, (_, i) => `quick_strike#${i + 10}`))],
     drawIndex: 0,
     discard: [],
     statuses: spec.statuses ?? [],

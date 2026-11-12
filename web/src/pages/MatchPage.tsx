@@ -103,7 +103,7 @@ export function MatchPage({ view, deadline, tier, onCommit, onNewMatch, onBack }
                 return <CardBack key={i} size="xs" style={{ transform: `rotate(${(i - m) * -5}deg) translateY(${Math.abs(i - m) * 3}px)` }} />;
               })}
             </div>
-            <DeckPile count={view.opponent.deckRemaining} label="Deck" />
+            <DeckPile count={view.opponent.deckRemaining} label="Deck" threshold={view.deckOutThreshold} />
           </section>
 
           {/* Arena */}
@@ -149,10 +149,15 @@ export function MatchPage({ view, deadline, tier, onCommit, onNewMatch, onBack }
               <span className="seat__name">You</span>
               <StatusChips statuses={view.self.statuses} />
               {drawNote && <span className="note">{drawNote}</span>}
+              {view.self.deckRemaining <= view.deckOutThreshold + 2 && (
+                <span className="note note--danger">
+                  Deck low: {view.self.deckRemaining} left — {view.deckOutThreshold} or fewer at the End phase and you lose
+                </span>
+              )}
             </div>
             <HpOrb hp={view.self.hp} max={view.maxHp} />
             <EnergyCrystals total={view.self.energy} available={locked ? view.self.energy - (laneCards.reduce((s, c) => s + c.def.cost, 0)) : remaining} max={view.energyPerTurn} />
-            <DeckPile count={view.self.deckRemaining} label="Deck" />
+            <DeckPile count={view.self.deckRemaining} label="Deck" threshold={view.deckOutThreshold} />
           </section>
 
           <section className="hand" aria-label="Your hand">
@@ -203,8 +208,15 @@ export function MatchPage({ view, deadline, tier, onCommit, onNewMatch, onBack }
 function GameOver({ view, tier, onNewMatch, onBack }: { view: PlayerView; tier: StakeTier | null; onNewMatch: () => void; onBack: () => void }) {
   const win = view.settlement === "HUMAN_WIN";
   const title = view.outcome === "DRAW" ? "Draw" : win ? "Victory" : "Defeat";
-  const reason =
-    view.endReason === "TURN_LIMIT" ? "Turn limit reached — higher HP wins." : view.outcome === "DRAW" ? "Both fell in the same turn. Draws go to the house." : null;
+  const why = (who: string, reasons: string[]) =>
+    reasons.map((r) => (r === "HP" ? `${who} fell to 0 HP` : `${who} ran out of deck (${view.deckOutThreshold} or fewer cards)`));
+  const reasons =
+    view.endReason === "TURN_LIMIT"
+      ? ["Turn limit reached — higher HP wins."]
+      : view.lossReasons
+        ? [...why("You", view.lossReasons.HUMAN), ...why("The AI", view.lossReasons.AI)]
+        : [];
+  const reason = reasons.length ? reasons.join(" · ") + (view.outcome === "DRAW" ? ". Draws go to the house." : ".") : null;
   return (
     <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="go-title">
       <div className={`gameover ${win ? "is-win" : "is-loss"}`}>

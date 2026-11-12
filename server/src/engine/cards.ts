@@ -16,6 +16,7 @@ const CARDS: CardDefinition[] = [
   { id: "arcane_bolt", name: "Arcane Bolt", type: "SPELL", cost: 3, description: "Deal 5 Spell damage. Ignores Block.", effect: { kind: "DAMAGE", amount: 5 } },
   { id: "regeneration", name: "Regeneration", type: "SPELL", cost: 2, description: "Heal 2 HP at the End phase of this turn and the next 2 turns.", effect: { kind: "HEAL_OVER_TIME", amountPerTurn: 2, duration: 3 } },
   { id: "disruption", name: "Disruption", type: "SPELL", cost: 3, description: "Opponent discards 2 random cards from their remaining hand (before damage). You don't see which.", effect: { kind: "DISCARD_RANDOM", count: 2 } },
+  { id: "arcane_insight", name: "Arcane Insight", type: "SPELL", cost: 1, description: "Draw 2 cards (after Disruption resolves). Careful: 1 or fewer cards left in your deck at the End phase means defeat.", effect: { kind: "DRAW_CARDS", count: 2 } },
   { id: "unstoppable", name: "Unstoppable", type: "SPELL", cost: 2, description: "Your Attack damage this turn cannot be blocked.", effect: { kind: "UNBLOCKABLE_ATTACKS", duration: 1 } },
   { id: "reflection", name: "Reflection", type: "SPELL", cost: 3, description: "This turn, HP damage you take from Attack and Spell cards is also dealt to the opponent. Reflected damage ignores Block and can't be reflected.", effect: { kind: "REFLECT_DAMAGE", duration: 1 } },
   { id: "lifesteal", name: "Lifesteal", type: "SPELL", cost: 2, description: "This turn and next turn, heal for the HP damage your Attack and Spell cards deal.", effect: { kind: "LIFESTEAL", duration: 2 } },
@@ -23,9 +24,9 @@ const CARDS: CardDefinition[] = [
 
 export const CARD_CATALOG: Catalog = Object.fromEntries(CARDS.map((c) => [c.id, c]));
 
-export const DECK_VERSION = "deck-v1";
+export const DECK_VERSION = "deck-v2";
 
-/** Canonical deck composition (20 cards), identical for both sides. PROPOSED. */
+/** Canonical deck composition (22 cards), identical for both sides. PROPOSED. */
 export const DECK_COMPOSITION: Record<string, number> = {
   quick_strike: 2,
   heavy_strike: 3,
@@ -38,6 +39,7 @@ export const DECK_COMPOSITION: Record<string, number> = {
   arcane_bolt: 1,
   regeneration: 1,
   disruption: 1,
+  arcane_insight: 2,
   unstoppable: 1,
   reflection: 1,
   lifesteal: 1,

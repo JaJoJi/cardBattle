@@ -13,5 +13,5 @@ placeholder automatically. Recommended format: PNG/WebP (rename the extension in
 | `vault/emblem.png` | Vault page emblem | 256×256 |
 
 Card ids: quick_strike, heavy_strike, meteor_impact, venom_strike, basic_shield,
-fortify, arcane_barrier, divine_protection, arcane_bolt, regeneration, disruption,
+fortify, arcane_barrier, divine_protection, arcane_bolt, regeneration, disruption, arcane_insight,
 unstoppable, reflection, lifesteal
