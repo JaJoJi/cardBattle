@@ -1,13 +1,23 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { AI_VERSION, chooseCards } from "./ai/bot";
 import { bothCommitted, commitSelection, createMatch, resolveTurn } from "./engine/engine";
 import { projectFor } from "./engine/projection";
 import { RULES } from "./engine/rules";
 import { createMatchRngs, type MatchRngs } from "./engine/rng";
 import { DECK_VERSION } from "./engine/cards";
-import type { MatchState, PlayerView } from "./engine/types";
+import type { MatchState, PlayerView, TurnReport } from "./engine/types";
 
 export type CommitResult = { ok: true } | { ok: false; reason: string };
+
+export interface SessionHooks {
+  /** Called after every resolved turn, with the full (private) report. Server-side only. */
+  onTurnResolved?: (report: TurnReport, session: MatchSession) => void;
+}
+
+/** sha256(master || matchId) — published before play so the shuffle can be verified afterwards. */
+export function seedCommitment(master: Buffer, matchId: string): string {
+  return createHash("sha256").update(master).update(matchId).digest("hex");
+}
 
 /**
  * One human-vs-AI match. Holds the private state; exposes only projections.
@@ -19,30 +29,62 @@ export class MatchSession {
   readonly token = randomBytes(24).toString("base64url");
   private readonly state: MatchState;
   private readonly rngs: MatchRngs;
+  private readonly master: Buffer;
   private deadline: number | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private started = false;
   lastActivity = Date.now();
 
   constructor(
     private readonly onChange: (s: MatchSession) => void,
     private readonly timeoutMs: number = RULES.planningTimeoutMs,
+    private readonly hooks: SessionHooks = {},
+    opts: { start?: boolean } = {},
   ) {
     const matchId = randomUUID();
-    this.rngs = createMatchRngs(matchId, { rules: RULES.version, deck: DECK_VERSION }, randomBytes(32));
+    this.master = randomBytes(32);
+    this.rngs = createMatchRngs(matchId, { rules: RULES.version, deck: DECK_VERSION }, this.master);
     this.state = createMatch({
       matchId,
       aiVersion: AI_VERSION,
       humanDeckRng: this.rngs.humanDeck,
       aiDeckRng: this.rngs.aiDeck,
     });
-    this.beginPlanning();
+    if (opts.start !== false) this.start();
   }
 
   get matchId() {
     return this.state.matchId;
   }
+  get isStarted() {
+    return this.started;
+  }
   get finished() {
     return this.state.phase === "FINISHED";
+  }
+  get outcome() {
+    return { outcome: this.state.outcome, settlement: this.state.settlement };
+  }
+  get hp() {
+    return { HUMAN: this.state.players.HUMAN.hp, AI: this.state.players.AI.hp };
+  }
+  get versions() {
+    return { rules: this.state.rulesVersion, deck: this.state.deckVersion, ai: this.state.aiVersion };
+  }
+  /** Commitment to the secret shuffle seed; safe to publish at any time. */
+  get seedCommitment(): string {
+    return seedCommitment(this.master, this.state.matchId);
+  }
+  /** The secret seed — only released once the match is over. */
+  revealSeed(): string | null {
+    return this.finished ? this.master.toString("hex") : null;
+  }
+
+  /** Begins planning (deferred for on-chain matches until the arena is live). */
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.beginPlanning();
   }
 
   humanView(): { view: PlayerView; deadline: number | null } {
@@ -51,6 +93,7 @@ export class MatchSession {
 
   commitHuman(turn: unknown, cards: unknown): CommitResult {
     this.lastActivity = Date.now();
+    if (!this.started) return { ok: false, reason: "Match has not started yet" };
     if (turn !== this.state.turn) return { ok: false, reason: "Stale submission for a different turn" };
     const result = commitSelection(this.state, "HUMAN", cards);
     if (!result.ok) return result;
@@ -85,12 +128,13 @@ export class MatchSession {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.deadline = null;
-    resolveTurn(this.state, this.rngs.resolution);
+    const report = resolveTurn(this.state, this.rngs.resolution);
     // Log only public facts — never hands, decks or pending selections.
     console.log(`[match ${this.state.matchId}] turn ${this.state.history.length} resolved; HP H=${this.state.players.HUMAN.hp} A=${this.state.players.AI.hp}`);
     if (this.state.phase === "FINISHED") {
       console.log(`[match ${this.state.matchId}] finished: ${this.state.outcome} → ${this.state.settlement}`);
     } else this.beginPlanning();
+    this.hooks.onTurnResolved?.(report, this);
     this.onChange(this);
   }
 }

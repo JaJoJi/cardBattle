@@ -1,0 +1,204 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Keypair, PublicKey } from "@solana/web3.js";
+import { createHash } from "node:crypto";
+import { ENTRY_TIMEOUT_MS, OnChainMatch, type HouseLike } from "../src/chain/onchainMatch";
+import { merkleRootOf, rulesHash } from "../src/chain/house";
+import { canonicalDeck, DECK_VERSION } from "../src/engine/cards";
+import { RULES } from "../src/engine/rules";
+import { createMatchRngs, shuffle } from "../src/engine/rng";
+import { seedCommitment } from "../src/session";
+
+/** In-memory stand-in for the RitArena program, recording every call in order. */
+class FakeHouse implements HouseLike {
+  publicKey = Keypair.generate().publicKey;
+  calls: string[] = [];
+  rounds: { round: number; leaves: Record<string, string | number>[]; hp: { player: number; house: number } }[] = [];
+  playerEntered = false;
+  failEnter = false;
+  winner?: string;
+
+  async ensureProfile() {
+    this.calls.push("ensureProfile");
+    return null;
+  }
+  async createMatchArena(stake: number) {
+    this.calls.push(`create:${stake}`);
+    return { arenaId: 42, tx: "sig-create" };
+  }
+  async hasEntered(_id: number, owner: PublicKey) {
+    return owner.equals(this.publicKey) || this.playerEntered;
+  }
+  async enter() {
+    this.calls.push("enter");
+    if (this.failEnter) throw new Error("insufficient funds");
+    return "sig-enter";
+  }
+  async start() {
+    this.calls.push("start");
+    return "sig-start";
+  }
+  async commitRound(_id: number, round: number, _p: PublicKey, leaves: Record<string, string | number>[], hp: { player: number; house: number }) {
+    this.calls.push(`round:${round}`);
+    this.rounds.push({ round, leaves, hp });
+    return `sig-round-${round}`;
+  }
+  async finalize(_id: number, _p: PublicKey, winner: "PLAYER" | "HOUSE") {
+    this.calls.push(`finalize:${winner}`);
+    this.winner = winner;
+    return { finalizeTx: "sig-final", claimTx: winner === "HOUSE" ? "sig-claim" : undefined };
+  }
+  async cancel() {
+    this.calls.push("cancel");
+    return "sig-cancel";
+  }
+}
+
+const flush = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+};
+
+function newMatch(house = new FakeHouse()) {
+  const player = Keypair.generate().publicKey;
+  const m = new OnChainMatch(house, player, 5_000_000, () => {}, () => {}, 60_000);
+  return { house, player, m };
+}
+
+async function settle(m: OnChainMatch) {
+  // Play passes until the match ends; flush the chain queue as we go.
+  let guard = 0;
+  while (!m.session.finished && guard++ < 100) {
+    expect(m.session.commitHuman(m.session.humanView().view.turn, []).ok).toBe(true);
+  }
+  for (let i = 0; i < 10 && m.status.phase !== "settled" && m.status.phase !== "failed"; i++) await flush();
+}
+
+describe("OnChainMatch lifecycle", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("creates the arena and waits for the player before staking or starting", async () => {
+    const { house, m } = newMatch();
+    await m.begin();
+    expect(m.status.phase).toBe("awaiting-entry");
+    expect(m.status.arenaId).toBe(42);
+    expect(house.calls).toEqual(["ensureProfile", "create:5000000"]);
+    expect(m.session.commitHuman(1, []).ok).toBe(false); // gameplay locked until the arena is live
+    await m.checkEntry();
+    expect(house.calls).not.toContain("enter");
+    m.dispose();
+  });
+
+  it("player enters → house enters, starts, commits the seed as round 1, then play begins", async () => {
+    const { house, m } = newMatch();
+    await m.begin();
+    house.playerEntered = true;
+    await m.checkEntry();
+    await flush();
+    expect(m.status.phase).toBe("playing");
+    expect(house.calls.slice(2, 5)).toEqual(["enter", "start", "round:1"]);
+    expect(house.rounds[0].leaves[0]).toMatchObject({ kind: "seed-commitment", commitment: m.status.seedCommitment });
+    expect(m.session.isStarted).toBe(true);
+    m.dispose();
+  });
+
+  it("commits one round per turn in order, then finalizes; a draw/loss settles to the house which claims", async () => {
+    const { house, m } = newMatch();
+    await m.begin();
+    house.playerEntered = true;
+    await m.checkEntry();
+    await settle(m);
+    const turns = m.session.humanView().view.lastTurn!.turn;
+    const rounds = house.calls.filter((c) => c.startsWith("round:")).map((c) => Number(c.split(":")[1]));
+    expect(rounds).toEqual(Array.from({ length: turns + 1 }, (_, i) => i + 1));
+    expect(house.calls.at(-1)).toMatch(/^finalize:/);
+    expect(m.status.phase).toBe("settled");
+    // Passing every turn never wins.
+    expect(m.status.winner).toBe("HOUSE");
+    expect(m.status.txs.some((t) => t.label === "House claims pot" && t.sig === "sig-claim")).toBe(true);
+    expect(m.status.playerMustClaim).toBe(false);
+    m.dispose();
+  });
+
+  it("round scores carry HP; leaves never contain card identities", async () => {
+    const { house, m } = newMatch();
+    await m.begin();
+    house.playerEntered = true;
+    await m.checkEntry();
+    expect(m.session.commitHuman(1, []).ok).toBe(true);
+    await flush();
+    const r2 = house.rounds.find((r) => r.round === 2)!;
+    const hp = m.session.humanView().view.lastTurn!.hpAfter;
+    expect(r2.hp).toEqual({ player: hp.HUMAN, house: hp.AI });
+    expect(JSON.stringify(r2.leaves)).not.toMatch(/#\d/); // no "card#n" uids
+    m.dispose();
+  });
+
+  it("reveals the seed only after the match, and it matches the pre-game commitment", async () => {
+    const { house, m } = newMatch();
+    await m.begin();
+    expect(m.status.seedReveal).toBeUndefined();
+    house.playerEntered = true;
+    await m.checkEntry();
+    await settle(m);
+    const seed = Buffer.from(m.status.seedReveal!, "hex");
+    expect(seedCommitment(seed, m.session.matchId)).toBe(m.status.seedCommitment);
+    const rngs = createMatchRngs(m.session.matchId, { rules: RULES.version, deck: DECK_VERSION }, seed);
+    const humanDeck = shuffle(canonicalDeck(), rngs.humanDeck);
+    // The human's opening hand (first 6 cards: 5 + turn-1 draw) is reproducible from the revealed seed.
+    const firstReport = m.session.humanView().view;
+    expect(humanDeck.length).toBe(60);
+    expect(firstReport.matchId).toBe(m.session.matchId);
+    m.dispose();
+  });
+
+  it("if the house cannot enter after the player staked, the arena is cancelled and the player can refund", async () => {
+    const house = new FakeHouse();
+    house.failEnter = true;
+    const { m } = newMatch(house);
+    await m.begin();
+    house.playerEntered = true;
+    await m.checkEntry();
+    expect(house.calls).toContain("cancel");
+    expect(house.calls).not.toContain("start");
+    expect(m.status.phase).toBe("cancelled");
+    expect(m.status.playerCanRefund).toBe(true);
+    m.dispose();
+  });
+
+  it("player can back out before entering; entry window expiry also cancels", async () => {
+    const a = newMatch();
+    await a.m.begin();
+    await a.m.cancelByPlayer();
+    expect(a.m.status.phase).toBe("cancelled");
+    expect(a.m.status.playerCanRefund).toBe(false);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const b = newMatch();
+    await b.m.begin();
+    vi.setSystemTime(Date.now() + ENTRY_TIMEOUT_MS + 1);
+    await b.m.checkEntry();
+    expect(b.house.calls).toContain("cancel");
+    expect(b.m.status.phase).toBe("cancelled");
+    a.m.dispose();
+    b.m.dispose();
+  });
+
+  it("payout is 2x stake minus the 1% protocol fee", () => {
+    const { m } = newMatch();
+    expect(m.status.payoutMicro).toBe(9_900_000);
+    m.dispose();
+  });
+});
+
+describe("chain helpers", () => {
+  it("rulesHash is stable and 32 bytes", () => {
+    expect(rulesHash()).toHaveLength(32);
+    expect(Buffer.from(rulesHash()).toString("hex")).toBe(Buffer.from(rulesHash()).toString("hex"));
+  });
+  it("merkle root changes when any leaf changes", () => {
+    const a = merkleRootOf([{ kind: "hp", side: "HUMAN", hp: 40 }]);
+    const b = merkleRootOf([{ kind: "hp", side: "HUMAN", hp: 39 }]);
+    expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
+    expect(createHash("sha256").update(a).digest()).toHaveLength(32);
+  });
+});

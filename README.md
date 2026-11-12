@@ -1,9 +1,14 @@
 # RitArena Card Battle
 
 Turn-based **human vs AI** card battle for [RitArena](https://github.com/BonChain/ritarena).
-Both sides secretly pick up to two cards, then reveal together. This repository is the
-**off-chain MVP**: a playable authoritative game server + web client. Solana settlement,
-MagicBlock VRF and Private Ephemeral Rollups are **not connected yet** (see [Roadmap](#roadmap)).
+Both sides secretly pick up to two cards, then reveal together. An authoritative game server
+and web client, with two play modes you can toggle in the top bar:
+
+- **Practice** — free matches against the house AI with a mock vault (no wallet, no chain).
+- **On-chain (devnet)** — staked matches settled through the deployed **RitArena program on
+  Solana devnet** using `@ritarena/sdk`, with test USDC. See [On-chain mode](#on-chain-mode-solana-devnet).
+
+MagicBlock VRF / Private Ephemeral Rollups are not integrated yet (see [Roadmap](#roadmap)).
 
 ## Quick start
 
@@ -19,6 +24,46 @@ npm run build && npm start   # production build served by the server → http://
 
 npm test             # engine, privacy and session tests (vitest)
 ```
+
+## On-chain mode (Solana devnet)
+
+Each staked match is a **1v1 RitArena arena** on the already-deployed program
+(`5fYaY6696pCJfPQvxC3GwHEDS91hXs1JZNpEK4ZmhCfH`) — **no contract changes**.
+
+| Step | Who signs | Instruction |
+| --- | --- | --- |
+| 1. Create arena: entry fee = stake, max 2 agents, prize split `[100]`, creator fee 0, `rules_hash` = sha256 of rules + deck | house (server) | `create_arena` |
+| 2. Player stakes (registers a profile first if needed) | **player wallet (Phantom)** | `register_profile`, `enter_arena` |
+| 3. House matches the stake, starts | house | `enter_arena`, `start_arena` |
+| 4. Round 1: Merkle root committing to `sha256(seed ‖ matchId)` | house | `submit_elimination` |
+| 5. One round per turn: Merkle root of the turn log, both HPs as scores | house | `submit_elimination` |
+| 6. Finalize rank-1 winner (draw ⇒ house); house auto-claims if it won | house | `finalize_arena`, `claim_prize` |
+| 7. Player claims if they won (2 × stake − 1% protocol fee) | **player wallet** | `claim_prize` |
+
+Safety ordering: the player stakes first and the house last, so if the house can't enter, the
+server cancels the arena (`cancel_arena`) and the player gets a **Refund** button
+(`refund_entry`). Players have a 10-minute entry window. If the server dies mid-match, the
+arena can be abandoned after 30 minutes of oracle inactivity and both stakes refunded.
+Gameplay never waits on the chain — turn commits are queued and sent in order.
+
+**Verifiable shuffle:** the secret seed's commitment is posted before turn 1 and the seed is
+revealed when the match ends (shown in the match's chain panel). `sha256(seed ‖ matchId)` must
+equal the commitment, and `createMatchRngs(matchId, versions, seed)` reproduces both decks.
+
+### Setup
+
+```bash
+cd server
+npm run chain:keygen        # creates a devnet house wallet in server/.env (gitignored)
+# fund the printed address with devnet SOL at https://faucet.solana.com (≈1 SOL)
+npm run chain:setup         # registers the house profile, mints 1,000 test USDC
+npm run chain:smoke         # optional: full devnet match with a throwaway player
+cd .. && npm run build && npm start
+```
+
+Players need Phantom set to devnet (Settings → Developer Settings → Testnet Mode) with a little
+devnet SOL; test USDC comes from the **Get 100 test USDC** button (the program's public faucet).
+Without a house key the server runs Practice mode only and the toggle is disabled.
 
 ## Screens
 
@@ -136,14 +181,21 @@ server/                    Node + TypeScript, authoritative
   src/engine/engine.ts     setup, validation, commit, deterministic turn resolver
   src/engine/projection.ts projectFor(state, side) — the only way state leaves the engine
   src/ai/bot.ts            deterministic heuristic AI (input: AI projection only)
-  src/session.ts           one match: commit locking, AI-first commit, timeouts
+  src/session.ts           one match: commit locking, AI-first commit, timeouts, seed commitment
+  src/chain/config.ts      loads server/.env (house key, RPC)
+  src/chain/house.ts       ArenaHouse: @ritarena/sdk wrapper (create/enter/start/round/finalize/cancel)
+  src/chain/onchainMatch.ts staked-match lifecycle, ordered tx queue, refund/cancel paths
+  scripts/                 chain:keygen, chain:setup, chain:smoke
   src/index.ts             HTTP (serves web/dist) + WebSocket /ws
   tests/                   engine, privacy/randomness, session tests
 web/                       React + Vite client (renders projections, submits actions)
   src/pages/VaultPage.tsx  home: mock vault stats, stake tiers, settlements
   src/pages/MatchPage.tsx  game board, hand, reveal overlay, game over
   src/components/          GameCard, Hud (HP orb, energy, portraits), BattleLog, RevealOverlay
-  src/data/mockVault.ts    MOCK vault data (replace with on-chain reads)
+  src/data/mockVault.ts    MOCK vault data (Practice mode)
+  src/pages/ChainVault.tsx live devnet vault (house balances, recent arenas) + wallet panel
+  src/components/ChainParts.tsx mode toggle, staking screen, chain status/tx log, claim/refund
+  src/lib/wallet.ts        Phantom connection; src/lib/chainClient.ts player-signed SDK calls
   public/ASSETS.md         expected art file names
 ```
 
@@ -164,8 +216,14 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 
 ## Trust assumptions & known limitations (MVP)
 
-- **The game server is fully trusted.** It sees both hands and both decks and decides the result. Nothing is verifiable by the player yet.
-- Randomness is server-local CSPRNG, not VRF. There is no commitment to the seed, so the operator could in principle grind decks.
+- **The game server is trusted for gameplay.** It sees both hands and both decks and computes every turn. On-chain mode
+  makes the *money* trust-minimised (escrow, payouts and refunds are enforced by the RitArena program) and makes the
+  *shuffle* verifiable after the fact (seed commitment → reveal), but the per-turn results and the winner it reports are
+  the oracle's word. The per-turn Merkle roots let a full log be checked later; they don't prove correct play.
+- The house wallet is also the arena oracle (it reports the result of a match it is playing in). That's inherent to the
+  current RitArena oracle model; an independent oracle or PER/TEE execution is the next step.
+- Randomness is server-local CSPRNG (committed before play in on-chain mode), not VRF.
+- On-chain matches live in server memory; if the server restarts mid-match, recovery is via abandon → refund after 30 min.
 - Matches are in memory; a server restart loses them. No accounts, no wallet, no stakes.
 - The AI is a simple heuristic (`heuristic-v1`) with small private-RNG tie-breaking; it's not tuned.
 - Balance is untested: flat 5 energy means Meteor Impact is playable from turn 1.
@@ -175,7 +233,8 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 
 ## Roadmap
 
-1. **MagicBlock VRF + PER proof of concept** — verify per-identity private reads, private VRF consumption, and commit-back; commit to `hash(privateEntropy)` before requesting VRF to prevent grinding.
-2. **Settlement** — integrate with the RitArena Anchor program's arena lifecycle (`create/enter/start/finalize_arena`, USDC escrow, fees) via an authenticated result; draws settle as human loss.
-3. Persistence, wallet sign-in, and end-to-end browser tests.
-4. Legal review of human-vs-house real-money play before enabling stakes.
+1. ~~Settlement via the RitArena program~~ — done for devnet (on-chain mode).
+2. **MagicBlock VRF + PER proof of concept** — verify per-identity private reads, private VRF consumption, and commit-back; commit to `hash(privateEntropy)` before requesting VRF to prevent grinding.
+3. Persist on-chain matches (resume after server restart), separate oracle from house wallet.
+4. Wallet-adapter support beyond Phantom; end-to-end browser tests.
+5. Legal review of human-vs-house real-money play before any mainnet stakes.

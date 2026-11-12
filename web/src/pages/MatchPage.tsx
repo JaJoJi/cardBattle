@@ -6,11 +6,17 @@ import { DeckPile, EnergyCrystals, HpOrb, Portrait, StatusChips } from "../compo
 import { LockIcon } from "../components/icons";
 import { RevealOverlay } from "../components/RevealOverlay";
 import { usdc, type StakeTier } from "../data/mockVault";
+import type { ChainStatus } from "../../../server/src/chain/types";
+import type { ServerConfig } from "../../../server/src/protocol";
+import { ChainPanel, ChainSettlement, type WalletState } from "../components/ChainParts";
 
 interface Props {
   view: PlayerView;
   deadline: number | null;
   tier: StakeTier | null;
+  chain: ChainStatus | null;
+  config: ServerConfig | null;
+  wallet: WalletState;
   onCommit: (turn: number, cards: string[]) => void;
   onNewMatch: () => void;
   onBack: () => void;
@@ -26,7 +32,7 @@ function useCountdown(deadline: number | null) {
   return deadline ? Math.max(0, Math.ceil((deadline - now) / 1000)) : null;
 }
 
-export function MatchPage({ view, deadline, tier, onCommit, onNewMatch, onBack }: Props) {
+export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommit, onNewMatch, onBack }: Props) {
   const [selected, setSelected] = useState<string[]>([]);
   const [reports, setReports] = useState<TurnReportView[]>([]);
   const [reveal, setReveal] = useState<TurnReportView | null>(null);
@@ -80,10 +86,16 @@ export function MatchPage({ view, deadline, tier, onCommit, onNewMatch, onBack }
         {!finished && !locked && secondsLeft !== null && (
           <span className={`timer ${secondsLeft <= 10 ? "timer--low" : ""}`}>⏱ {secondsLeft}s</span>
         )}
-        {tier && (
-          <span className="stake-pill" title="Practice — no funds move">
-            {tier.name} · {usdc(tier.stake, 0)} USDC
+        {chain ? (
+          <span className="stake-pill stake-pill--chain" title="Staked on Solana devnet">
+            Arena #{chain.arenaId} · {usdc(chain.stakeMicro / 1_000_000, 0)} USDC staked
           </span>
+        ) : (
+          tier && (
+            <span className="stake-pill" title="Practice — no funds move">
+              Practice · {tier.name} {usdc(tier.stake, 0)} USDC
+            </span>
+          )
         )}
       </div>
 
@@ -196,16 +208,39 @@ export function MatchPage({ view, deadline, tier, onCommit, onNewMatch, onBack }
           )}
         </div>
 
-        <BattleLog reports={reports} />
+        <div className="side-col">
+          {chain && <ChainPanel status={chain} />}
+          <BattleLog reports={reports} />
+        </div>
       </div>
 
       {reveal && <RevealOverlay report={reveal} onClose={() => setReveal(null)} />}
-      {finished && !reveal && <GameOver view={view} tier={tier} onNewMatch={onNewMatch} onBack={onBack} />}
+      {finished && !reveal && (
+        <GameOver
+          view={view}
+          tier={tier}
+          settlement={chain && config ? <ChainSettlement status={chain} w={wallet} config={config} /> : null}
+          onNewMatch={onNewMatch}
+          onBack={onBack}
+        />
+      )}
     </main>
   );
 }
 
-function GameOver({ view, tier, onNewMatch, onBack }: { view: PlayerView; tier: StakeTier | null; onNewMatch: () => void; onBack: () => void }) {
+function GameOver({
+  view,
+  tier,
+  settlement,
+  onNewMatch,
+  onBack,
+}: {
+  view: PlayerView;
+  tier: StakeTier | null;
+  settlement: React.ReactNode;
+  onNewMatch: () => void;
+  onBack: () => void;
+}) {
   const win = view.settlement === "HUMAN_WIN";
   const title = view.outcome === "DRAW" ? "Draw" : win ? "Victory" : "Defeat";
   const why = (who: string, reasons: string[]) =>
@@ -225,7 +260,8 @@ function GameOver({ view, tier, onNewMatch, onBack }: { view: PlayerView; tier: 
           You {Math.max(0, view.self.hp)} HP · AI {Math.max(0, view.opponent.hp)} HP
         </p>
         {reason && <p className="muted">{reason}</p>}
-        {tier && (
+        {settlement}
+        {!settlement && tier && (
           <p className="gameover__payout">
             {win ? `Mock payout: ${usdc(tier.stake * tier.payoutMultiplier)} USDC` : `Mock stake of ${usdc(tier.stake)} USDC kept by the vault`}
           </p>

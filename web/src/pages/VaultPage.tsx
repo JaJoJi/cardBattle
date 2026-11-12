@@ -1,16 +1,62 @@
 import type { PlayerView } from "../../../server/src/engine/types";
+import type { PlayMode, ServerConfig } from "../../../server/src/protocol";
+import type { WalletState } from "../components/ChainParts";
+import { ChainVault } from "./ChainVault";
 import { VAULT_EMBLEM } from "../assets";
 import { Art } from "../components/Art";
 import { CheckIcon, EqualIcon, VaultIcon, XIcon } from "../components/icons";
 import { MOCK_VAULT, RECENT_SETTLEMENTS, STAKE_TIERS, freeLiquidity, maxSinglePayout, usdc, type StakeTier } from "../data/mockVault";
 
 interface Props {
+  mode: PlayMode;
+  config: ServerConfig | null;
+  wallet: WalletState;
   activeMatch: PlayerView | null;
+  activeIsChain: boolean;
   onEnter: (tier: StakeTier) => void;
+  onEnterChain: (stakeUsdc: number) => void;
   onResume: () => void;
 }
 
-export function VaultPage({ activeMatch, onEnter, onResume }: Props) {
+export function VaultPage({ mode, config, wallet, activeMatch, activeIsChain, onEnter, onEnterChain, onResume }: Props) {
+  const chain = mode === "chain" && config?.chainEnabled;
+  return (
+    <main className="vault">
+      <section className="vault__hero">
+        <Art className="vault__emblem" src={VAULT_EMBLEM} alt="Vault emblem" fallback={<span className="vault__emblem-glyph"><VaultIcon /></span>} />
+        <div className="vault__intro">
+          {chain ? (
+            <span className="mock-badge mock-badge--chain">Live · Solana devnet · test USDC</span>
+          ) : (
+            <span className="mock-badge">Practice · mock data · no funds move</span>
+          )}
+          <h1>{MOCK_VAULT.name}</h1>
+          <p className="muted">
+            {chain
+              ? "Stake test USDC on devnet and duel the house AI. The house matches your stake; the winner takes the pot."
+              : "Free practice against the house AI. Switch to On-chain to stake test USDC on Solana devnet."}
+          </p>
+        </div>
+      </section>
+
+      {activeMatch && activeMatch.phase !== "FINISHED" && (
+        <div className="resume">
+          <span>
+            You have {activeIsChain ? "a staked" : "a practice"} match in progress — turn {activeMatch.turn}, you {activeMatch.self.hp} HP vs AI{" "}
+            {activeMatch.opponent.hp} HP.
+          </span>
+          <button className="btn btn--gold" onClick={onResume}>
+            Continue match
+          </button>
+        </div>
+      )}
+
+      {chain && config ? <ChainVault config={config} w={wallet} onEnter={onEnterChain} /> : <MockVaultBody onEnter={onEnter} />}
+    </main>
+  );
+}
+
+function MockVaultBody({ onEnter }: { onEnter: (tier: StakeTier) => void }) {
   const tiles = [
     { label: "Vault balance", value: usdc(MOCK_VAULT.balanceUsdc), unit: "USDC" },
     { label: "Free liquidity", value: usdc(freeLiquidity()), unit: "USDC" },
@@ -21,32 +67,7 @@ export function VaultPage({ activeMatch, onEnter, onResume }: Props) {
   ];
 
   return (
-    <main className="vault">
-      <section className="vault__hero">
-        <Art className="vault__emblem" src={VAULT_EMBLEM} alt="Vault emblem" fallback={<span className="vault__emblem-glyph"><VaultIcon /></span>} />
-        <div className="vault__intro">
-          <span className="mock-badge">Mock data · not connected to Solana</span>
-          <h1>{MOCK_VAULT.name}</h1>
-          <p className="muted">
-            Stake USDC and duel the house AI. Win and the vault pays out; lose or draw and your stake stays in the vault.
-          </p>
-        </div>
-        <button className="btn btn--ghost" disabled title="Wallet integration comes with Solana settlement">
-          Connect wallet (soon)
-        </button>
-      </section>
-
-      {activeMatch && activeMatch.phase !== "FINISHED" && (
-        <div className="resume">
-          <span>
-            You have a match in progress — turn {activeMatch.turn}, you {activeMatch.self.hp} HP vs AI {activeMatch.opponent.hp} HP.
-          </span>
-          <button className="btn btn--gold" onClick={onResume}>
-            Continue match
-          </button>
-        </div>
-      )}
-
+    <>
       <section className="tiles" aria-label="Vault statistics">
         {tiles.map((t) => (
           <div key={t.label} className="tile">
@@ -128,6 +149,6 @@ export function VaultPage({ activeMatch, onEnter, onResume }: Props) {
           </table>
         </div>
       </section>
-    </main>
+    </>
   );
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClientMessage, ServerMessage } from "../../../server/src/protocol";
+import type { ClientMessage, PlayMode, ServerConfig, ServerMessage } from "../../../server/src/protocol";
+import type { ChainStatus } from "../../../server/src/chain/types";
 import type { CardDefinition, PlayerView } from "../../../server/src/engine/types";
 
 const TOKEN_KEY = "ritarena-cardbattle-token";
@@ -30,6 +31,10 @@ export function useGame() {
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false); // welcome received and resume attempted
   const [catalog, setCatalog] = useState<CardDefinition[]>([]);
+  const [config, setConfig] = useState<ServerConfig | null>(null);
+  const [mode, setMode] = useState<PlayMode | null>(null); // mode of the current game
+  const [chain, setChain] = useState<ChainStatus | null>(null);
+  const [errorSeq, setErrorSeq] = useState(0);
 
   useEffect(() => {
     let closed = false;
@@ -56,6 +61,7 @@ export function useGame() {
         switch (msg.type) {
           case "welcome": {
             setCatalog(msg.catalog);
+            setConfig(msg.config);
             const token = readToken();
             if (token) ws.send(JSON.stringify({ type: "resume", token } satisfies ClientMessage));
             else setReady(true);
@@ -63,10 +69,17 @@ export function useGame() {
           }
           case "session":
             writeToken(msg.token);
+            setMode(msg.mode);
+            if (msg.mode !== "chain") setChain(null);
+            break;
+          case "chain":
+            setChain(msg.status);
             break;
           case "no-session":
             writeToken(null);
             setView(null);
+            setChain(null);
+            setMode(null);
             setReady(true);
             break;
           case "state":
@@ -76,6 +89,7 @@ export function useGame() {
             break;
           case "error":
             setError(msg.message);
+            setErrorSeq((n) => n + 1);
             break;
         }
       };
@@ -99,11 +113,17 @@ export function useGame() {
     connection,
     ready,
     catalog,
+    config,
+    mode,
+    chain,
+    errorSeq,
     view,
     deadline,
     error,
     clearError: () => setError(null),
-    newMatch: () => send({ type: "new-match" }),
+    newMatch: (opts: { mode: PlayMode; stakeMicro?: number; player?: string } = { mode: "mock" }) => send({ type: "new-match", ...opts }),
+    chainEntered: () => send({ type: "chain-entered" }),
+    chainCancel: () => send({ type: "chain-cancel" }),
     commit: (turn: number, cards: string[]) => send({ type: "commit", turn, cards }),
   };
 }
