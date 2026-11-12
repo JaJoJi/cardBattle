@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ChallengeStore, RateLimiter } from "./chain/auth";
 import { loadChainConfig } from "./chain/config";
 import { MatchStore } from "./chain/store";
+import { MatchVrf, loadVrfIdl } from "./chain/vrf";
 import { ArenaHouse, USDC } from "./chain/house";
 import { OnChainMatch } from "./chain/onchainMatch";
 import { CARD_CATALOG } from "./engine/cards";
@@ -47,6 +48,21 @@ const MIME: Record<string, string> = {
 // --- chain ---
 const chain = loadChainConfig();
 const house = chain.enabled && chain.house ? new ArenaHouse(new Connection(chain.rpcUrl, "confirmed"), chain.house) : null;
+/** MagicBlock VRF seeding for staked matches — only when the cardbattle_vrf program is configured. */
+const vrf = (() => {
+  if (!house || !chain.vrfProgramId) return null;
+  try {
+    const idl = loadVrfIdl();
+    if ((idl as { address?: string }).address !== chain.vrfProgramId) {
+      console.error(`[vrf] IDL address ${(idl as { address?: string }).address} != CARDBATTLE_VRF_PROGRAM_ID ${chain.vrfProgramId} — VRF disabled`);
+      return null;
+    }
+    return new MatchVrf(house.connection, chain.house!, idl);
+  } catch (e) {
+    console.error(`[vrf] disabled: ${(e as Error).message}`);
+    return null;
+  }
+})();
 const serverConfig: ServerConfig = {
   chainEnabled: !!house,
   chainDisabledReason: chain.reason,
@@ -54,6 +70,7 @@ const serverConfig: ServerConfig = {
   rpcUrl: chain.rpcUrl,
   house: house?.publicKey.toBase58(),
   programId: PROGRAM_ID.toBase58(),
+  vrfProgramId: vrf?.programId.toBase58(),
 };
 
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -219,7 +236,16 @@ async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip
     return "Could not reach Solana devnet — try again shortly.";
   }
   const holder: { game?: Game } = {};
-  const match = new OnChainMatch(house, player, stakeMicro, () => holder.game && (pushChain(holder.game), persist(holder.game)), onSessionChange);
+  const match = new OnChainMatch(
+    house,
+    player,
+    stakeMicro,
+    () => holder.game && (pushChain(holder.game), persist(holder.game)),
+    onSessionChange,
+    undefined,
+    undefined,
+    vrf ?? undefined,
+  );
   const game = chainGame(match, holder);
   void match.begin();
   return game;
@@ -236,7 +262,14 @@ async function restoreMatches() {
     }
     try {
       const holder: { game?: Game } = {};
-      const match = OnChainMatch.restore(house, snap, () => holder.game && (pushChain(holder.game), persist(holder.game)), onSessionChange);
+      const match = OnChainMatch.restore(
+        house,
+        snap,
+        () => holder.game && (pushChain(holder.game), persist(holder.game)),
+        onSessionChange,
+        undefined,
+        vrf ?? undefined,
+      );
       registerGame(chainGame(match, holder));
       console.log(`[restore] arena #${snap.status.arenaId ?? "-"} (${snap.status.phase}, turn ${match.session.humanView().view.turn}) for ${snap.player}`);
       void match.resume();
@@ -348,4 +381,5 @@ void restoreMatches();
 http.listen(PORT, () => {
   console.log(`RitArena Card Battle server on http://localhost:${PORT} (ws: /ws)`);
   console.log(house ? `On-chain mode: ${chain.cluster}, house ${house.publicKey.toBase58()}` : `On-chain mode disabled: ${chain.reason}`);
+  if (house) console.log(vrf ? `Randomness: MagicBlock VRF via ${vrf.programId.toBase58()}` : "Randomness: server seed commit-reveal (set CARDBATTLE_VRF_PROGRAM_ID for MagicBlock VRF)");
 });

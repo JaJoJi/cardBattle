@@ -19,8 +19,16 @@ export interface ChainStatus {
   payoutMicro: number;
   house: string;
   player: string;
+  /**
+   * commit-reveal-v1: commitment = sha256(seed || matchId), seed revealed at the end.
+   * vrf-v2: commitment = sha256(entropy || matchId) posted with the MagicBlock VRF request;
+   *         seed = sha256("RITARENA_SEED_V2" || entropy || vrf || matchId); entropy revealed at the end.
+   */
+  seedScheme?: "commit-reveal-v1" | "vrf-v2";
   seedCommitment: string;
+  /** Revealed after the match: the seed (v1) or the house's private entropy (v2). */
   seedReveal?: string;
+  vrf?: { program: string; account: string; randomness?: string; requestedSlot?: number; fulfilledSlot?: number };
   winner?: "PLAYER" | "HOUSE";
   /** The player won and must sign `claim_prize` from their wallet. */
   playerMustClaim?: boolean;

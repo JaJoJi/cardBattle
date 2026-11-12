@@ -11,6 +11,8 @@ export interface ServerConfig {
   rpcUrl: string;
   house?: string; // base58 house/oracle wallet
   programId?: string;
+  /** Set when staked matches seed from MagicBlock VRF. */
+  vrfProgramId?: string;
 }
 
 export type ClientMessage =

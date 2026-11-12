@@ -1,15 +1,16 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
 import { RULES } from "../engine/rules";
 import type { TurnReport } from "../engine/types";
-import { MatchSession, type SessionSnapshot } from "../session";
+import { MatchSession, seedCommitment, type SessionSnapshot } from "../session";
+import { deriveVrfMaster, type VrfLike } from "./vrf";
 import type { ArenaHouse, Leaf } from "./house";
 import type { ChainPhase, ChainStatus, ChainTx } from "./types";
 export type { ChainPhase, ChainStatus, ChainTx } from "./types";
 
 export type HouseLike = Pick<
   ArenaHouse,
-  "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "claim" | "cancel" | "currentRound"
+  "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "claim" | "cancel" | "currentRound" | "refundOwn"
 >;
 
 export const ENTRY_TIMEOUT_MS = 10 * 60_000;
@@ -41,6 +42,8 @@ export interface OnChainSnapshot {
   player: string;
   status: ChainStatus;
   session: SessionSnapshot;
+  /** vrf-v2 only: the house's private entropy (hex). Secret until the match ends. */
+  vrfEntropy?: string;
 }
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 300);
@@ -62,6 +65,8 @@ export class OnChainMatch {
   private queue: Promise<void> = Promise.resolve();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private entering = false;
+  /** vrf-v2: the house's private entropy, committed on-chain before the VRF output exists. */
+  private readonly entropy: Buffer | null;
 
   constructor(
     private readonly house: HouseLike,
@@ -71,6 +76,7 @@ export class OnChainMatch {
     onSessionChange: (s: MatchSession) => void,
     timeoutMs: number = RULES.planningTimeoutMs,
     restore?: OnChainSnapshot,
+    private readonly vrf?: VrfLike,
   ) {
     this.session = new MatchSession(
       onSessionChange,
@@ -80,8 +86,10 @@ export class OnChainMatch {
     );
     if (restore) {
       this.status = structuredClone(restore.status);
+      this.entropy = restore.vrfEntropy ? Buffer.from(restore.vrfEntropy, "hex") : null;
       return;
     }
+    this.entropy = vrf ? randomBytes(32) : null;
     this.status = {
       cluster: "devnet",
       phase: "creating",
@@ -90,9 +98,14 @@ export class OnChainMatch {
       payoutMicro: Math.floor((stakeMicro * 2 * (10_000 - PROTOCOL_FEE_BPS)) / 10_000),
       house: house.publicKey.toBase58(),
       player: player.toBase58(),
-      seedCommitment: this.session.seedCommitment,
+      seedScheme: vrf ? "vrf-v2" : "commit-reveal-v1",
+      seedCommitment: vrf ? seedCommitment(this.entropy!, this.session.matchId) : this.session.seedCommitment,
       txs: [],
     };
+  }
+
+  get usesVrf(): boolean {
+    return this.status.seedScheme === "vrf-v2";
   }
 
   get arenaId() {
@@ -104,7 +117,14 @@ export class OnChainMatch {
   }
 
   snapshot(): OnChainSnapshot {
-    return { version: 1, savedAt: Date.now(), player: this.player.toBase58(), status: structuredClone(this.status), session: this.session.snapshot() };
+    return {
+      version: 1,
+      savedAt: Date.now(),
+      player: this.player.toBase58(),
+      status: structuredClone(this.status),
+      session: this.session.snapshot(),
+      vrfEntropy: this.entropy?.toString("hex"),
+    };
   }
 
   /** Rebuilds a match from disk (the session is replayed deterministically). Call `resume()` next. */
@@ -114,8 +134,10 @@ export class OnChainMatch {
     onUpdate: (m: OnChainMatch) => void,
     onSessionChange: (s: MatchSession) => void,
     timeoutMs: number = RULES.planningTimeoutMs,
+    vrf?: VrfLike,
   ): OnChainMatch {
-    return new OnChainMatch(house, new PublicKey(snap.player), snap.status.stakeMicro, onUpdate, onSessionChange, timeoutMs, snap);
+    if (snap.status.seedScheme === "vrf-v2" && !vrf) throw new Error("This match uses MagicBlock VRF but no VRF program is configured");
+    return new OnChainMatch(house, new PublicKey(snap.player), snap.status.stakeMicro, onUpdate, onSessionChange, timeoutMs, snap, vrf);
   }
 
   /**
@@ -201,6 +223,7 @@ export class OnChainMatch {
       await this.cancel(`House could not enter: ${errMsg(e)}`, true);
       return;
     }
+    if (this.usesVrf && !(await this.obtainVrfSeed(arenaId))) return;
     try {
       await this.track("Start arena", async () => ({ sig: (await withRetry(() => this.house.start(arenaId))) ?? undefined }));
     } catch (e) {
@@ -208,8 +231,48 @@ export class OnChainMatch {
       return;
     }
     this.enqueueRound(1, this.seedLeaves(), { player: this.session.hp.HUMAN, house: this.session.hp.AI });
+    this.session.start(); // before the phase change, so the persisted snapshot is already "started"
     this.setPhase("playing");
-    this.session.start();
+  }
+
+  /**
+   * vrf-v2: posts the commitment + VRF request in one tx, waits for MagicBlock's oracle,
+   * then re-deals from sha256(entropy || vrf || matchId). Runs while the arena is still in
+   * Registration, so if VRF never arrives the arena is cancelled and both stakes refunded.
+   */
+  private async obtainVrfSeed(arenaId: number): Promise<boolean> {
+    const vrf = this.vrf!;
+    const commitment = Buffer.from(this.status.seedCommitment, "hex");
+    this.status.vrf = { program: vrf.programId.toBase58(), account: vrf.pda(arenaId).toBase58() };
+    try {
+      await this.track("Commit house entropy + request MagicBlock VRF", async () => ({
+        sig: (await withRetry(() => vrf.request(arenaId, commitment))) ?? undefined,
+      }));
+      const acc = await this.track("MagicBlock VRF delivers randomness", async () => {
+        const a = await vrf.waitFulfilled(arenaId, 60_000);
+        return { value: a };
+      });
+      if (!acc.commitment.equals(commitment)) throw new Error("On-chain commitment does not match the house entropy");
+      this.status.vrf = {
+        ...this.status.vrf,
+        randomness: acc.randomness.toString("hex"),
+        requestedSlot: acc.requestedSlot,
+        fulfilledSlot: acc.fulfilledSlot,
+      };
+      this.session.reseed(deriveVrfMaster(this.entropy!, acc.randomness, this.session.matchId));
+      this.onUpdate(this);
+      return true;
+    } catch (e) {
+      // Both stakes are in escrow and the arena is still in Registration: cancel, refund the house,
+      // and let the player refund theirs.
+      await this.cancel(`MagicBlock VRF failed: ${errMsg(e)}. The arena was cancelled — refund your stake.`, true);
+      try {
+        await this.track("House refunds its entry", async () => ({ sig: (await withRetry(() => this.house.refundOwn(arenaId))) ?? undefined }));
+      } catch {
+        /* recorded; chain:recover retries */
+      }
+      return false;
+    }
   }
 
   /** Player backs out before entering. */
@@ -231,7 +294,10 @@ export class OnChainMatch {
       {
         kind: "seed-commitment",
         matchId: this.session.matchId,
-        commitment: this.session.seedCommitment,
+        scheme: this.status.seedScheme ?? "commit-reveal-v1",
+        commitment: this.status.seedCommitment,
+        vrfAccount: this.status.vrf?.account ?? "",
+        vrfRandomness: this.status.vrf?.randomness ?? "",
         rules: this.session.versions.rules,
         deck: this.session.versions.deck,
         ai: this.session.versions.ai,
@@ -268,7 +334,7 @@ export class OnChainMatch {
     const { outcome, settlement } = this.session.outcome;
     const winner = settlement === "HUMAN_WIN" ? "PLAYER" : "HOUSE"; // draws settle to the house
     this.status.winner = winner;
-    this.status.seedReveal = this.session.revealSeed() ?? undefined;
+    this.status.seedReveal = (this.usesVrf ? this.entropy?.toString("hex") : this.session.revealSeed()) ?? undefined;
     this.setPhase("finalizing");
     const arenaId = this.status.arenaId!;
     const leaves: Leaf[] = [

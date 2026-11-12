@@ -44,9 +44,9 @@ export interface SessionSnapshot {
 
 export class MatchSession {
   readonly token: string;
-  private readonly state: MatchState;
-  private readonly rngs: MatchRngs;
-  private readonly master: Buffer;
+  private state: MatchState;
+  private rngs: MatchRngs;
+  private master: Buffer;
   private deadline: number | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -78,6 +78,22 @@ export class MatchSession {
     if (r) {
       if (r.started) this.replay(r.humanCommits);
     } else if (opts.start !== false) this.start();
+  }
+
+  /**
+   * Replaces the shuffle seed before play begins (on-chain VRF mode: the seed only exists
+   * once MagicBlock's randomness is delivered). Re-deals both decks from the new seed.
+   */
+  reseed(master: Buffer): void {
+    if (this.started) throw new Error("Cannot reseed a match that has started");
+    this.master = Buffer.from(master);
+    this.rngs = createMatchRngs(this.state.matchId, { rules: RULES.version, deck: DECK_VERSION }, this.master);
+    this.state = createMatch({
+      matchId: this.state.matchId,
+      aiVersion: AI_VERSION,
+      humanDeckRng: this.rngs.humanDeck,
+      aiDeckRng: this.rngs.aiDeck,
+    });
   }
 
   snapshot(): SessionSnapshot {

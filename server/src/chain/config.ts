@@ -13,6 +13,8 @@ export interface ChainConfig {
   rpcUrl: string;
   /** Oracle + house wallet (creates arenas, enters as the AI, reports and finalizes). */
   house: Keypair | null;
+  /** cardbattle_vrf program id; when set, staked matches seed from MagicBlock VRF (vrf-v2). */
+  vrfProgramId: string | null;
   /** Why on-chain mode is disabled, if it is. */
   reason?: string;
 }
@@ -22,13 +24,14 @@ export function loadChainConfig(): ChainConfig {
   loadEnv({ path: ENV_PATH, quiet: true });
   const rpcUrl = process.env.SOLANA_RPC_URL || clusterApiUrl("devnet");
   const secret = process.env.CARDBATTLE_HOUSE_SECRET;
+  const vrfProgramId = process.env.CARDBATTLE_VRF_PROGRAM_ID || null;
   if (!secret) {
-    return { enabled: false, cluster: "devnet", rpcUrl, house: null, reason: "No house key — run `npm run chain:keygen` in server/" };
+    return { enabled: false, cluster: "devnet", rpcUrl, house: null, vrfProgramId, reason: "No house key — run `npm run chain:keygen` in server/" };
   }
   try {
     const house = Keypair.fromSecretKey(bs58.decode(secret));
-    return { enabled: true, cluster: "devnet", rpcUrl, house };
+    return { enabled: true, cluster: "devnet", rpcUrl, house, vrfProgramId };
   } catch {
-    return { enabled: false, cluster: "devnet", rpcUrl, house: null, reason: "CARDBATTLE_HOUSE_SECRET is not a valid base58 secret key" };
+    return { enabled: false, cluster: "devnet", rpcUrl, house: null, vrfProgramId, reason: "CARDBATTLE_HOUSE_SECRET is not a valid base58 secret key" };
   }
 }

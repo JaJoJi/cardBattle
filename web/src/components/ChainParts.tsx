@@ -163,16 +163,57 @@ export function ChainPanel({ status }: { status: ChainStatus }) {
         </div>
       </dl>
       <details className="chain-panel__seed">
-        <summary>Shuffle seed commitment</summary>
-        <p className="mono small break">{status.seedCommitment}</p>
-        {status.seedReveal ? (
-          <p className="small">
-            Revealed seed: <span className="mono break">{status.seedReveal}</span>
-            <br />
-            <span className="muted">sha256(seed ‖ matchId) must equal the commitment above; replaying the shuffle reproduces both decks.</span>
-          </p>
+        <summary>
+          Randomness: {status.seedScheme === "vrf-v2" ? <strong className="vrf-badge">MagicBlock VRF</strong> : "server seed (commit-reveal)"}
+        </summary>
+        {status.seedScheme === "vrf-v2" ? (
+          <>
+            <p className="small muted">
+              The house committed to secret entropy and requested MagicBlock VRF in one transaction, before the VRF output existed.
+              Decks are shuffled from sha256(entropy ‖ VRF ‖ matchId) — neither side could choose them.
+            </p>
+            {status.vrf && (
+              <p className="small">
+                VRF account:{" "}
+                <a className="mono" href={explorerAddr(status.vrf.account)} target="_blank" rel="noreferrer">
+                  {shortAddr(status.vrf.account)} ↗
+                </a>
+                {status.vrf.randomness ? (
+                  <>
+                    <br />
+                    VRF output: <span className="mono break">{status.vrf.randomness}</span>
+                  </>
+                ) : (
+                  <span className="muted"> — waiting for the oracle…</span>
+                )}
+              </p>
+            )}
+            <p className="small">
+              Entropy commitment: <span className="mono break">{status.seedCommitment}</span>
+            </p>
+            {status.seedReveal ? (
+              <p className="small">
+                Revealed entropy: <span className="mono break">{status.seedReveal}</span>
+                <br />
+                <span className="muted">Check: sha256(entropy ‖ matchId) = commitment (stored in the VRF account); then the seed reproduces both decks.</span>
+              </p>
+            ) : (
+              <p className="muted small">The house entropy is revealed when the match ends.</p>
+            )}
+          </>
         ) : (
-          <p className="muted small">The secret seed is revealed when the match ends so you can verify the decks weren't changed.</p>
+          <>
+            <p className="mono small break">{status.seedCommitment}</p>
+            {status.seedReveal ? (
+              <p className="small">
+                Revealed seed: <span className="mono break">{status.seedReveal}</span>
+                <br />
+                <span className="muted">sha256(seed ‖ matchId) must equal the commitment above; replaying the shuffle reproduces both decks.</span>
+              </p>
+            ) : (
+              <p className="muted small">The secret seed is revealed when the match ends so you can verify the decks weren't changed.</p>
+            )}
+          </>
         )}
       </details>
       {status.error && <p className="small error-text">{status.error}</p>}

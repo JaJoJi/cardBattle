@@ -172,6 +172,13 @@ class Chain implements HouseLike {
     this.calls.push("claim");
     return "cl";
   }
+  refunded = false;
+  async refundOwn() {
+    if (this.refunded) return null;
+    this.refunded = true;
+    this.calls.push("refundOwn");
+    return "rf";
+  }
   async cancel() {
     this.calls.push("cancel");
     return "x";

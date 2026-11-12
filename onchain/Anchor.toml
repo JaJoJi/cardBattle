@@ -1,0 +1,16 @@
+[toolchain]
+anchor_version = "1.0.2"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.devnet]
+cardbattle_vrf = "11111111111111111111111111111111"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/cardbattle-house.json"
+
+[scripts]
+test = "echo 'tests live in server/scripts (chain:vrf-smoke)'"

@@ -16,6 +16,7 @@
     "chain:recover": "tsx scripts/recover.ts"
   },
   "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
     "@ritarena/sdk": "^0.5.5",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.99.0",

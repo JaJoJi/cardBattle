@@ -1,0 +1,24 @@
+[package]
+name = "cardbattle-vrf"
+version = "0.1.0"
+description = "RitArena Card Battle — per-arena MagicBlock VRF randomness bound to a pre-committed house seed"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "cardbattle_vrf"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = "1.0.2"
+ephemeral-rollups-sdk = { version = "0.17.3", features = ["anchor", "vrf"] }

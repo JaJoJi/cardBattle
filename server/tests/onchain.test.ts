@@ -86,6 +86,13 @@ class FakeHouse implements HouseLike {
     this.claimed = true;
     return "sig-claim";
   }
+  refunded = false;
+  async refundOwn() {
+    if (this.refunded) return null;
+    this.refunded = true;
+    this.calls.push("refundOwn");
+    return "rf";
+  }
   async cancel() {
     this.calls.push("cancel");
     return "sig-cancel";

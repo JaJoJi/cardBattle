@@ -195,6 +195,29 @@ export class ArenaHouse {
     return program.methods.cancelArena().accounts({ creator: this.publicKey, arena: pdas.arena(arenaId) }).rpc();
   }
 
+  /** Refunds the house's own entry from a cancelled/abandoned arena. Null if nothing to refund. */
+  async refundOwn(arenaId: number): Promise<string | null> {
+    const entry = await this.sdk.getAgentDetails(arenaId, this.publicKey);
+    if (!entry || entry.refunded) return null;
+    const arena = await this.sdk.getArena(arenaId);
+    if (!arena) throw new Error(`Arena ${arenaId} not found`);
+    const arenaPda = pdas.arena(arenaId);
+    const program = (this.sdk as unknown as {
+      program: { methods: { refundEntry(): { accountsPartial(a: object): { rpc(): Promise<string> } } } };
+    }).program;
+    return program.methods
+      .refundEntry()
+      .accountsPartial({
+        agentOwner: this.publicKey,
+        arena: arenaPda,
+        arenaEntry: entryPda(arenaId, this.publicKey),
+        arenaVault: pdas.arenaVault(arenaPda),
+        agentUsdc: await getAssociatedTokenAddress(arena.usdcMint, this.publicKey),
+        usdcMint: arena.usdcMint,
+      })
+      .rpc();
+  }
+
   async recentArenas(limit = 8) {
     const arenas = await this.sdk.listArenas({ creator: this.publicKey });
     return arenas
