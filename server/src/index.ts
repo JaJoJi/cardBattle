@@ -9,6 +9,7 @@ import { ChallengeStore, RateLimiter } from "./chain/auth";
 import { loadChainConfig } from "./chain/config";
 import { MatchStore } from "./chain/store";
 import { MatchVrf, loadVrfIdl } from "./chain/vrf";
+import { ProfileStore } from "./ai/profiles";
 import { ArenaHouse, USDC } from "./chain/house";
 import { OnChainMatch } from "./chain/onchainMatch";
 import { CARD_CATALOG } from "./engine/cards";
@@ -144,6 +145,17 @@ const challenges = new ChallengeStore();
 const ipLimiter = new RateLimiter(LIMITS.matchesPerIpPerHour, 3600_000);
 const walletLimiter = new RateLimiter(LIMITS.matchesPerWalletPerHour, 3600_000);
 const store = house ? new MatchStore() : null;
+/** Per-wallet play patterns (revealed plays only) the AI learns across staked matches. */
+const profiles = house ? new ProfileStore() : null;
+
+function recordProfile(g: Game) {
+  if (!profiles || !g.chain || !g.session.finished) return;
+  try {
+    profiles.record(g.chain.player.toBase58(), g.session.matchId, g.session.aiObservations());
+  } catch (e) {
+    console.error(`[profiles] ${(e as Error).message}`);
+  }
+}
 
 function persist(g: Game) {
   if (!store || !g.chain) return;
@@ -194,6 +206,7 @@ const onSessionChange = (s: MatchSession) => {
   if (!g) return;
   pushState(g);
   persist(g); // a resolved turn is recorded before anything else can happen
+  if (s.finished) recordProfile(g);
 };
 
 function registerGame(g: Game) {
@@ -245,6 +258,7 @@ async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip
     undefined,
     undefined,
     vrf ?? undefined,
+    profiles?.prior(player.toBase58()),
   );
   const game = chainGame(match, holder);
   void match.begin();

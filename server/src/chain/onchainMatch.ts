@@ -4,6 +4,7 @@ import { RULES } from "../engine/rules";
 import type { TurnReport } from "../engine/types";
 import { MatchSession, seedCommitment, type SessionSnapshot } from "../session";
 import { deriveVrfMaster, type VrfLike } from "./vrf";
+import type { PatternStats } from "../ai/patterns";
 import type { ArenaHouse, Leaf } from "./house";
 import type { ChainPhase, ChainStatus, ChainTx } from "./types";
 export type { ChainPhase, ChainStatus, ChainTx } from "./types";
@@ -77,12 +78,13 @@ export class OnChainMatch {
     timeoutMs: number = RULES.planningTimeoutMs,
     restore?: OnChainSnapshot,
     private readonly vrf?: VrfLike,
+    aiPrior?: PatternStats,
   ) {
     this.session = new MatchSession(
       onSessionChange,
       timeoutMs,
       { onTurnResolved: (r) => this.onTurnResolved(r) },
-      restore ? { restore: restore.session } : { start: false },
+      restore ? { restore: restore.session } : { start: false, aiPrior },
     );
     if (restore) {
       this.status = structuredClone(restore.status);

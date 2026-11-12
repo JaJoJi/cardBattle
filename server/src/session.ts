@@ -1,9 +1,11 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { AI_VERSION, chooseCards } from "./ai/bot";
+import { AI_VERSIONS, createAi, defaultAiVersion, type AiPlayer } from "./ai";
+import type { ObservedPlay } from "./ai/memory";
+import type { PatternStats } from "./ai/patterns";
 import { bothCommitted, commitSelection, createMatch, resolveTurn } from "./engine/engine";
 import { projectFor } from "./engine/projection";
 import { RULES } from "./engine/rules";
-import { createMatchRngs, type MatchRngs } from "./engine/rng";
+import { createMatchRngs, createSeededRng, deriveSeed, type MatchRngs } from "./engine/rng";
 import { DECK_VERSION } from "./engine/cards";
 import type { MatchState, PlayerView, TurnReport } from "./engine/types";
 
@@ -37,6 +39,10 @@ export interface SessionSnapshot {
   master: string; // hex
   started: boolean;
   humanCommits: string[][];
+  /** The AI's selection each turn; replayed verbatim so restores never re-run the search. */
+  aiCommits?: string[][];
+  /** Frozen pattern prior (this player's earlier matches) the AI started with. */
+  aiPrior?: PatternStats;
   rulesVersion: string;
   deckVersion: string;
   aiVersion: string;
@@ -53,30 +59,38 @@ export class MatchSession {
   private replaying = false;
   /** Every accepted human selection (incl. timeout passes), in turn order. */
   private readonly humanCommits: string[][] = [];
+  private readonly aiCommits: string[][] = [];
+  private replayAi: string[][] | null = null;
+  private readonly ai: AiPlayer;
+  private readonly aiPrior?: PatternStats;
   lastActivity = Date.now();
 
   constructor(
     private readonly onChange: (s: MatchSession) => void,
     private readonly timeoutMs: number = RULES.planningTimeoutMs,
     private readonly hooks: SessionHooks = {},
-    opts: { start?: boolean; restore?: SessionSnapshot } = {},
+    opts: { start?: boolean; restore?: SessionSnapshot; aiVersion?: string; aiPrior?: PatternStats } = {},
   ) {
     const r = opts.restore;
-    if (r && (r.rulesVersion !== RULES.version || r.deckVersion !== DECK_VERSION || r.aiVersion !== AI_VERSION)) {
+    if (r && (r.rulesVersion !== RULES.version || r.deckVersion !== DECK_VERSION || !(AI_VERSIONS as readonly string[]).includes(r.aiVersion))) {
       throw new Error(`Cannot restore match ${r.matchId}: it was played with ${r.rulesVersion}/${r.deckVersion}/${r.aiVersion}`);
     }
+    // A match keeps the AI version (and frozen prior) it started with, even across upgrades.
+    const aiVersion = r?.aiVersion ?? opts.aiVersion ?? defaultAiVersion();
+    this.aiPrior = r ? r.aiPrior : opts.aiPrior;
+    this.ai = createAi(aiVersion, this.aiPrior);
     this.token = r?.token ?? randomBytes(24).toString("base64url");
     const matchId = r?.matchId ?? randomUUID();
     this.master = r ? Buffer.from(r.master, "hex") : randomBytes(32);
     this.rngs = createMatchRngs(matchId, { rules: RULES.version, deck: DECK_VERSION }, this.master);
     this.state = createMatch({
       matchId,
-      aiVersion: AI_VERSION,
+      aiVersion,
       humanDeckRng: this.rngs.humanDeck,
       aiDeckRng: this.rngs.aiDeck,
     });
     if (r) {
-      if (r.started) this.replay(r.humanCommits);
+      if (r.started) this.replay(r.humanCommits, r.aiCommits ?? null);
     } else if (opts.start !== false) this.start();
   }
 
@@ -90,7 +104,7 @@ export class MatchSession {
     this.rngs = createMatchRngs(this.state.matchId, { rules: RULES.version, deck: DECK_VERSION }, this.master);
     this.state = createMatch({
       matchId: this.state.matchId,
-      aiVersion: AI_VERSION,
+      aiVersion: this.state.aiVersion,
       humanDeckRng: this.rngs.humanDeck,
       aiDeckRng: this.rngs.aiDeck,
     });
@@ -103,6 +117,8 @@ export class MatchSession {
       master: this.master.toString("hex"),
       started: this.started,
       humanCommits: this.humanCommits.map((c) => [...c]),
+      aiCommits: this.aiCommits.map((c) => [...c]),
+      aiPrior: this.aiPrior,
       rulesVersion: this.state.rulesVersion,
       deckVersion: this.state.deckVersion,
       aiVersion: this.state.aiVersion,
@@ -114,9 +130,15 @@ export class MatchSession {
     return this.state.history;
   }
 
+  /** Revealed human decisions the AI observed this match (feeds the per-player profile). */
+  aiObservations(): ObservedPlay[] {
+    return this.ai.matchObservations();
+  }
+
   /** Rebuilds state by replaying recorded commits; hooks and change events are suppressed. */
-  private replay(commits: string[][]): void {
+  private replay(commits: string[][], aiCommits: string[][] | null): void {
     this.replaying = true;
+    this.replayAi = aiCommits ? aiCommits.map((c) => [...c]) : null;
     try {
       this.start();
       for (const c of commits) {
@@ -126,6 +148,7 @@ export class MatchSession {
       }
     } finally {
       this.replaying = false;
+      this.replayAi = null;
     }
   }
 
@@ -184,10 +207,21 @@ export class MatchSession {
 
   private beginPlanning(): void {
     if (this.state.phase !== "PLANNING") return;
-    // The AI only ever sees its own projection.
-    const aiChoice = chooseCards(projectFor(this.state, "AI"), this.rngs.ai);
+    // The AI only ever sees its own projection. During a replay it re-observes the same
+    // views (rebuilding its memory) but its recorded choice is used verbatim.
+    const view = projectFor(this.state, "AI");
+    const recorded = this.replayAi?.[this.aiCommits.length];
+    let aiChoice: string[];
+    if (recorded) {
+      this.ai.observe(view);
+      aiChoice = recorded;
+    } else {
+      // Per-turn AI randomness derived from the match seed: reproducible, independent of history.
+      aiChoice = this.ai.decide(view, createSeededRng(deriveSeed(this.master, `RITARENA_AI_TURN_V1|${this.state.turn}`)));
+    }
     const r = commitSelection(this.state, "AI", aiChoice);
     if (!r.ok) commitSelection(this.state, "AI", []); // defensive: never stall the match
+    this.aiCommits.push([...(this.state.commits.AI ?? [])]);
     this.deadline = Date.now() + this.timeoutMs;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.onTimeout(), this.timeoutMs);
@@ -206,6 +240,7 @@ export class MatchSession {
     this.deadline = null;
     this.humanCommits.push([...this.state.commits.HUMAN!]);
     const report = resolveTurn(this.state, this.rngs.resolution);
+    if (this.state.phase === "FINISHED") this.ai.observe(projectFor(this.state, "AI"));
     if (this.replaying) {
       if (this.state.phase !== "FINISHED") this.beginPlanning();
       return;

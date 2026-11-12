@@ -31,7 +31,8 @@ export function chooseCards(view: PlayerView, rng: Rng): string[] {
   return best.map((c) => c.uid);
 }
 
-function scoreOption(view: PlayerView, option: CardView[]): number {
+/** Heuristic value of a play from `view`'s side. Also used by search-v3 as its opponent prior. */
+export function scoreOption(view: PlayerView, option: CardView[]): number {
   const { self, opponent } = view;
   // Rough threat estimate: the opponent can play up to 2 cards worth ~4 damage each,
   // or a big card. Lower own HP → value defence more.
@@ -46,6 +47,7 @@ function scoreOption(view: PlayerView, option: CardView[]): number {
   let block = 0;
   let heal = 0;
   let draws = 0;
+  let lifesteal = false;
   let score = 0;
   for (const { def, e } of all) {
     switch (e.kind) {
@@ -76,7 +78,7 @@ function scoreOption(view: PlayerView, option: CardView[]): number {
         score += expectedIncoming * 0.4;
         break;
       case "LIFESTEAL":
-        score += 1.5 + Math.min(attack + attackUnblockable + spell, view.maxHp - self.hp) * 0.4;
+        lifesteal = true; // valued after all damage is summed (order-independent)
         break;
       case "DRAW_CARDS":
         draws += e.count;
@@ -90,6 +92,8 @@ function scoreOption(view: PlayerView, option: CardView[]): number {
     if (self.deckRemaining - drawable <= view.deckOutThreshold) score -= 1000;
     else score += drawable * 1.2;
   }
+
+  if (lifesteal) score += 1.5 + Math.min(attack + attackUnblockable + spell, view.maxHp - self.hp) * 0.4;
 
   // Blockable Attack damage is discounted when the opponent could be blocking.
   score += attack * 0.75 + attackUnblockable + spell * 1.1;
