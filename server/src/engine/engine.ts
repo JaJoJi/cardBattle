@@ -170,6 +170,8 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     hpAfter: { HUMAN: 0, AI: 0 },
   };
   const defs = (side: Side) => commits[side].map((uid) => ({ uid, def: cardOf(uid, catalog) }));
+  /** Every effect of every committed card for a side, with its source card. */
+  const effects = (side: Side) => defs(side).flatMap(({ uid, def }) => def.effects.map((e) => ({ uid, def, e })));
 
   // 2. Consume cards and energy atomically.
   for (const side of SIDES) {
@@ -184,8 +186,7 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
   // 3. Defensive setup and temporary flags.
   for (const side of SIDES) {
     const p = state.players[side];
-    for (const { def } of defs(side)) {
-      const e = def.effect;
+    for (const { e } of effects(side)) {
       if (e.kind === "GAIN_BLOCK") {
         p.block += e.amount;
         report.blockGained[side] += e.amount;
@@ -203,9 +204,9 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
   for (const side of SIDES) {
     const target = opponentOf(side);
     const tp = state.players[target];
-    for (const { def } of defs(side)) {
-      if (def.effect.kind !== "DISCARD_RANDOM") continue;
-      for (let i = 0; i < def.effect.count && tp.hand.length > 0; i++) {
+    for (const { e } of effects(side)) {
+      if (e.kind !== "DISCARD_RANDOM") continue;
+      for (let i = 0; i < e.count && tp.hand.length > 0; i++) {
         const [uid] = tp.hand.splice(rng.int(tp.hand.length), 1);
         tp.discard.push(uid);
         report.discarded[target].push(uid);
@@ -213,13 +214,13 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     }
   }
 
-  // 4b. Card draw spells (after discards, so Disruption cannot hit freshly drawn cards).
+  // 4b. Card draw (after discards, so Disruption cannot hit freshly drawn cards).
   //     Respects the hand limit: excess draws are skipped and stay in the deck.
   for (const side of SIDES) {
     const p = state.players[side];
-    for (const { def } of defs(side)) {
-      if (def.effect.kind !== "DRAW_CARDS") continue;
-      for (let i = 0; i < def.effect.count; i++) {
+    for (const { e } of effects(side)) {
+      if (e.kind !== "DRAW_CARDS") continue;
+      for (let i = 0; i < e.count; i++) {
         if (p.hand.length >= RULES.maxHandSize || p.drawIndex >= p.deck.length) break;
         const uid = p.deck[p.drawIndex++];
         p.hand.push(uid);
@@ -228,32 +229,31 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     }
   }
 
-  // 5–7. Shared Attack damage pool per target; Block applied once to the pool.
+  // 5-7. Attack damage per target. Blockable Attack damage forms one shared pool and
+  //      the target's Block is applied once to it; unblockable Attack damage (card flag
+  //      or the attacker's Unstoppable status) is tracked separately and skips Block.
   const cardDamage: DamageRecord[] = [];
   for (const target of SIDES) {
     const attacker = opponentOf(target);
-    const attacks = defs(attacker).filter(({ def }) => def.type === "ATTACK");
-    const raw = attacks.reduce(
-      (sum, { def }) =>
-        sum + (def.effect.kind === "DAMAGE" || def.effect.kind === "DAMAGE_AND_POISON" ? def.effect.amount : 0),
-      0,
-    );
-    if (attacks.length > 0) {
-      const unblockable = !!hasStatus(state.players[attacker], "UNBLOCKABLE");
-      const absorbed = unblockable ? 0 : Math.min(state.players[target].block, raw);
-      cardDamage.push({
-        sourceCards: attacks.map((a) => a.uid),
-        sourcePlayer: attacker,
-        target,
-        category: "ATTACK",
-        raw,
-        unblockable,
-        absorbed,
-        hpDamage: raw - absorbed,
-      });
+    const allUnblockable = !!hasStatus(state.players[attacker], "UNBLOCKABLE");
+    const pools = { blockable: { raw: 0, cards: new Set<string>() }, unblockable: { raw: 0, cards: new Set<string>() } };
+    for (const { uid, def, e } of effects(attacker)) {
+      if (def.type !== "ATTACK" || e.kind !== "DAMAGE") continue;
+      const pool = allUnblockable || e.unblockable ? pools.unblockable : pools.blockable;
+      pool.raw += e.amount;
+      pool.cards.add(uid);
+    }
+    if (pools.blockable.cards.size > 0) {
+      const raw = pools.blockable.raw;
+      const absorbed = Math.min(state.players[target].block, raw);
+      cardDamage.push({ sourceCards: [...pools.blockable.cards], sourcePlayer: attacker, target, category: "ATTACK", raw, unblockable: false, absorbed, hpDamage: raw - absorbed });
+    }
+    if (pools.unblockable.cards.size > 0) {
+      const raw = pools.unblockable.raw;
+      cardDamage.push({ sourceCards: [...pools.unblockable.cards], sourcePlayer: attacker, target, category: "ATTACK", raw, unblockable: true, absorbed: 0, hpDamage: raw });
     }
     // Poison applies when the effect resolves, even if the damage was fully blocked.
-    if (attacks.some(({ def }) => def.effect.kind === "DAMAGE_AND_POISON")) {
+    if (effects(attacker).some(({ e }) => e.kind === "POISON")) {
       applyStatus(state.players[target], {
         kind: "POISON",
         remaining: RULES.poison.duration,
@@ -265,10 +265,9 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
   // 8. Spell damage bypasses Block.
   for (const target of SIDES) {
     const attacker = opponentOf(target);
-    for (const { uid, def } of defs(attacker)) {
-      if (def.type !== "SPELL" || def.effect.kind !== "DAMAGE") continue;
-      const raw = def.effect.amount;
-      cardDamage.push({ sourceCards: [uid], sourcePlayer: attacker, target, category: "SPELL", raw, unblockable: true, absorbed: 0, hpDamage: raw });
+    for (const { uid, def, e } of effects(attacker)) {
+      if (def.type !== "SPELL" || e.kind !== "DAMAGE") continue;
+      cardDamage.push({ sourceCards: [uid], sourcePlayer: attacker, target, category: "SPELL", raw: e.amount, unblockable: true, absorbed: 0, hpDamage: e.amount });
     }
   }
   for (const d of cardDamage) state.players[d.target].hp -= d.hpDamage;
@@ -290,8 +289,10 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     heal(state, report, side, "LIFESTEAL", dealt);
   }
 
-  // 10. Healing over time.
+  // 10. Healing: instant card heals, then healing over time. Neither can revive.
   for (const side of SIDES) {
+    const instant = effects(side).reduce((sum, { e }) => sum + (e.kind === "HEAL" ? e.amount : 0), 0);
+    heal(state, report, side, "CARD", instant);
     const regen = hasStatus(state.players[side], "REGENERATION");
     if (regen) heal(state, report, side, "REGENERATION", regen.amount ?? 0);
   }

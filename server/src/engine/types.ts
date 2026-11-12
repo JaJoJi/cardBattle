@@ -5,9 +5,11 @@ export type Side = "HUMAN" | "AI";
 export type CardType = "ATTACK" | "DEFENSE" | "SPELL";
 
 export type CardEffect =
-  | { kind: "DAMAGE"; amount: number } // ATTACK card → Attack damage, SPELL card → Spell damage
-  | { kind: "DAMAGE_AND_POISON"; amount: number }
+  /** ATTACK card: Attack damage (blockable unless `unblockable`). SPELL card: Spell damage (ignores Block). */
+  | { kind: "DAMAGE"; amount: number; unblockable?: boolean }
+  | { kind: "POISON" } // applies Poison (RULES.poison) to the opponent; never stacks
   | { kind: "GAIN_BLOCK"; amount: number }
+  | { kind: "HEAL"; amount: number } // instant heal in the healing step
   | { kind: "HEAL_OVER_TIME"; amountPerTurn: number; duration: number }
   | { kind: "DISCARD_RANDOM"; count: number }
   | { kind: "DRAW_CARDS"; count: number }
@@ -21,7 +23,8 @@ export interface CardDefinition {
   type: CardType;
   cost: number;
   description: string;
-  effect: CardEffect;
+  /** Resolved by the engine in its fixed phase order, never in list order. */
+  effects: CardEffect[];
 }
 
 export type Catalog = Record<string, CardDefinition>;
@@ -68,7 +71,7 @@ export interface DamageRecord {
 
 export interface HealRecord {
   target: Side;
-  source: "LIFESTEAL" | "REGENERATION";
+  source: "LIFESTEAL" | "REGENERATION" | "CARD";
   amount: number; // actual HP restored (after cap)
 }
 

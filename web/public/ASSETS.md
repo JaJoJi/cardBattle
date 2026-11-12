@@ -12,6 +12,10 @@ placeholder automatically. Recommended format: PNG/WebP (rename the extension in
 | `avatars/ai.png` | AI portrait | 256×256 |
 | `vault/emblem.png` | Vault page emblem | 256×256 |
 
-Card ids: quick_strike, heavy_strike, meteor_impact, venom_strike, basic_shield,
-fortify, arcane_barrier, divine_protection, arcane_bolt, regeneration, disruption, arcane_insight,
-unstoppable, reflection, lifesteal
+Card ids (30):
+- Attack: quick_strike, heavy_strike, shield_bash, piercing_arrow, venom_strike, cleave,
+  rending_claw, draining_bite, crushing_blow, phantom_lance, guillotine, meteor_impact
+- Defense: basic_shield, bandage, fortify, tactical_retreat, arcane_barrier, second_wind,
+  iron_skin, mirror_shield, divine_protection
+- Spell: arcane_insight, toxic_cloud, regeneration, unstoppable, lifesteal, arcane_bolt,
+  disruption, reflection, fireball

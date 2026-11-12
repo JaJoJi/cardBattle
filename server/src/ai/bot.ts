@@ -2,7 +2,7 @@ import { RULES } from "../engine/rules";
 import type { Rng } from "../engine/rng";
 import type { CardView, PlayerView } from "../engine/types";
 
-export const AI_VERSION = "heuristic-v1";
+export const AI_VERSION = "heuristic-v2";
 
 /**
  * Chooses 0–2 cards within the energy budget. Input is the AI's own projection
@@ -37,28 +37,34 @@ function scoreOption(view: PlayerView, option: CardView[]): number {
   // or a big card. Lower own HP → value defence more.
   const expectedIncoming = Math.min(opponent.handCount, 2) * 4 + (self.hp <= 20 ? 6 : 0);
   const hasStatus = (kind: string, statuses = self.statuses) => statuses.some((s) => s.kind === kind);
-  const unblockable = hasStatus("UNBLOCKABLE") || option.some((c) => c.def.effect.kind === "UNBLOCKABLE_ATTACKS");
+  const all = option.flatMap(({ def }) => def.effects.map((e) => ({ def, e })));
+  const unblockableAll = hasStatus("UNBLOCKABLE") || all.some(({ e }) => e.kind === "UNBLOCKABLE_ATTACKS");
 
-  let attack = 0;
+  let attack = 0; // blockable Attack damage
+  let attackUnblockable = 0;
   let spell = 0;
   let block = 0;
+  let heal = 0;
+  let draws = 0;
   let score = 0;
-  for (const { def } of option) {
-    const e = def.effect;
+  for (const { def, e } of all) {
     switch (e.kind) {
       case "DAMAGE":
-        if (def.type === "ATTACK") attack += e.amount;
-        else spell += e.amount;
+        if (def.type !== "ATTACK") spell += e.amount;
+        else if (e.unblockable || unblockableAll) attackUnblockable += e.amount;
+        else attack += e.amount;
         break;
-      case "DAMAGE_AND_POISON":
-        attack += e.amount;
+      case "POISON":
         if (!hasStatus("POISON", opponent.statuses)) score += 2.5;
         break;
       case "GAIN_BLOCK":
         block += e.amount;
         break;
+      case "HEAL":
+        heal += e.amount;
+        break;
       case "HEAL_OVER_TIME":
-        score += Math.min(e.amountPerTurn * e.duration, view.maxHp - self.hp) * 0.8;
+        heal += e.amountPerTurn * e.duration;
         break;
       case "DISCARD_RANDOM":
         score += Math.min(e.count, opponent.handCount) * 2;
@@ -70,26 +76,28 @@ function scoreOption(view: PlayerView, option: CardView[]): number {
         score += expectedIncoming * 0.4;
         break;
       case "LIFESTEAL":
-        score += 1.5;
+        score += 1.5 + Math.min(attack + attackUnblockable + spell, view.maxHp - self.hp) * 0.4;
         break;
-      case "DRAW_CARDS": {
-        // Drawing to the deck-out threshold loses at the End phase — never do it.
-        const drawable = Math.min(e.count, RULES.maxHandSize - (self.hand.length - option.length));
-        if (self.deckRemaining - drawable <= view.deckOutThreshold) score -= 1000;
-        else score += Math.max(0, drawable) * 1.2;
+      case "DRAW_CARDS":
+        draws += e.count;
         break;
-      }
     }
   }
 
-  // Attack damage is discounted when the opponent could be blocking.
-  const attackValue = unblockable ? attack : attack * 0.75;
-  score += attackValue + spell * 1.1;
+  if (draws > 0) {
+    // Drawing to the deck-out threshold loses at the End phase — never do it.
+    const drawable = Math.max(0, Math.min(draws, RULES.maxHandSize - (self.hand.length - option.length)));
+    if (self.deckRemaining - drawable <= view.deckOutThreshold) score -= 1000;
+    else score += drawable * 1.2;
+  }
+
+  // Blockable Attack damage is discounted when the opponent could be blocking.
+  score += attack * 0.75 + attackUnblockable + spell * 1.1;
   score += Math.min(block, expectedIncoming) * 0.85;
-  if (option.some((c) => c.def.effect.kind === "LIFESTEAL")) score += Math.min(attack + spell, view.maxHp - self.hp) * 0.4;
+  score += Math.min(heal, view.maxHp - self.hp) * 0.8;
 
   // Lethal if unblocked: strongly prefer.
-  if (attack + spell >= opponent.hp) score += 50;
+  if (attack + attackUnblockable + spell >= opponent.hp) score += 50;
   // Mild preference for spending energy efficiently.
   score -= option.reduce((s, c) => s + c.def.cost, 0) * 0.05;
   return score;

@@ -32,7 +32,7 @@ export function ReportLines({ report }: { report: TurnReportView }) {
       ))}
       {report.heals.map((h, i) => (
         <li key={`h${i}`} className="line line--heal">
-          {NAME[h.target]}: +{h.amount} HP ({h.source === "LIFESTEAL" ? "Lifesteal" : "Regen"})
+          {NAME[h.target]}: +{h.amount} HP ({h.source === "LIFESTEAL" ? "Lifesteal" : h.source === "CARD" ? "card" : "Regen"})
         </li>
       ))}
       {report.youDrew.length > 0 && <li className="line line--draw">You drew {report.youDrew.map((c) => c.def.name).join(", ")}</li>}

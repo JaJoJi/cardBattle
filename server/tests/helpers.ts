@@ -6,12 +6,12 @@ import type { Catalog, MatchState, PlayerState, Status } from "../src/engine/typ
 /** Real catalog plus test-only cards for exact spec examples. */
 export const TEST_CATALOG: Catalog = {
   ...CARD_CATALOG,
-  strike_8: { id: "strike_8", name: "Strike 8", type: "ATTACK", cost: 1, description: "", effect: { kind: "DAMAGE", amount: 8 } },
-  strike_10: { id: "strike_10", name: "Strike 10", type: "ATTACK", cost: 1, description: "", effect: { kind: "DAMAGE", amount: 10 } },
-  bolt_10: { id: "bolt_10", name: "Bolt 10", type: "SPELL", cost: 1, description: "", effect: { kind: "DAMAGE", amount: 10 } },
-  bolt_5: { id: "bolt_5", name: "Bolt 5", type: "SPELL", cost: 1, description: "", effect: { kind: "DAMAGE", amount: 5 } },
-  block_6: { id: "block_6", name: "Block 6", type: "DEFENSE", cost: 1, description: "", effect: { kind: "GAIN_BLOCK", amount: 6 } },
-  block_15: { id: "block_15", name: "Block 15", type: "DEFENSE", cost: 1, description: "", effect: { kind: "GAIN_BLOCK", amount: 15 } },
+  strike_8: { id: "strike_8", name: "Strike 8", type: "ATTACK", cost: 1, description: "", effects: [{ kind: "DAMAGE", amount: 8 }] },
+  strike_10: { id: "strike_10", name: "Strike 10", type: "ATTACK", cost: 1, description: "", effects: [{ kind: "DAMAGE", amount: 10 }] },
+  bolt_10: { id: "bolt_10", name: "Bolt 10", type: "SPELL", cost: 1, description: "", effects: [{ kind: "DAMAGE", amount: 10 }] },
+  bolt_5: { id: "bolt_5", name: "Bolt 5", type: "SPELL", cost: 1, description: "", effects: [{ kind: "DAMAGE", amount: 5 }] },
+  block_6: { id: "block_6", name: "Block 6", type: "DEFENSE", cost: 1, description: "", effects: [{ kind: "GAIN_BLOCK", amount: 6 }] },
+  block_15: { id: "block_15", name: "Block 15", type: "DEFENSE", cost: 1, description: "", effects: [{ kind: "GAIN_BLOCK", amount: 15 }] },
 };
 
 interface PlayerSpec {

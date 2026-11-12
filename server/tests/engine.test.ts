@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { commitSelection, createMatch, resolveTurn } from "../src/engine/engine";
 import { RULES } from "../src/engine/rules";
+import { CARD_CATALOG, DECK_COMPOSITION, canonicalDeck, defIdOf, validateDeck } from "../src/engine/cards";
 import type { MatchState, Side } from "../src/engine/types";
 import { TEST_CATALOG, makeState, rng } from "./helpers";
 
@@ -345,5 +346,99 @@ describe("simultaneous actions and outcomes", () => {
     const s = makeState({ hand: ["meteor_impact#1", "quick_strike#1"] }, { hp: 20 });
     play(s, ["meteor_impact#1"], []);
     expect(commitSelection(s, "HUMAN", ["quick_strike#1"]).ok).toBe(false);
+  });
+});
+
+describe("deck-building rules (deck-v3)", () => {
+  it("canonical deck is 60 cards: 30 different cards x2, never more than 2 copies", () => {
+    const deck = canonicalDeck();
+    expect(deck).toHaveLength(60);
+    const counts = new Map<string, number>();
+    for (const uid of deck) counts.set(defIdOf(uid), (counts.get(defIdOf(uid)) ?? 0) + 1);
+    expect(counts.size).toBe(30);
+    expect(Math.max(...counts.values())).toBeLessThanOrEqual(2);
+  });
+
+  it("has more Attack, Defense and Spell cards than before (12 / 9 / 9 distinct)", () => {
+    const types = Object.values(CARD_CATALOG).map((c) => c.type);
+    expect(types.filter((t) => t === "ATTACK")).toHaveLength(12);
+    expect(types.filter((t) => t === "DEFENSE")).toHaveLength(9);
+    expect(types.filter((t) => t === "SPELL")).toHaveLength(9);
+  });
+
+  it("rejects a 3rd copy and decks over 60", () => {
+    expect(validateDeck({ quick_strike: 3 })).toEqual(["quick_strike: 3 copies (max 2)"]);
+    const big = Object.fromEntries(Object.keys(CARD_CATALOG).map((id) => [id, 2]));
+    big.extra = 1;
+    expect(validateDeck(big).join()).toMatch(/unknown card extra/);
+    expect(validateDeck({ ...DECK_COMPOSITION, quick_strike: 3 }).join()).toMatch(/61 cards|3 copies/);
+    expect(() => canonicalDeck({ fortify: 3 })).toThrow(/max 2/);
+  });
+
+  it("every card has a positive cost and effects; Defense cards never deal damage", () => {
+    for (const c of Object.values(CARD_CATALOG)) {
+      expect(c.cost).toBeGreaterThan(0);
+      expect(c.effects.length).toBeGreaterThan(0);
+      expect(c.description.length).toBeGreaterThan(0);
+      if (c.type === "DEFENSE") expect(c.effects.some((e) => e.kind === "DAMAGE")).toBe(false);
+    }
+  });
+});
+
+describe("new cards", () => {
+  it("Piercing Arrow skips Block while other Attack damage still shares the Block pool", () => {
+    const s = makeState({ hand: ["heavy_strike#1", "piercing_arrow#1"] }, { hand: ["fortify#1"] });
+    const r = play(s, ["heavy_strike#1", "piercing_arrow#1"], ["fortify#1"]);
+    expect(r.damage.filter((d) => d.category === "ATTACK")).toEqual([
+      expect.objectContaining({ raw: 4, absorbed: 4, hpDamage: 0, unblockable: false }),
+      expect.objectContaining({ raw: 3, absorbed: 0, hpDamage: 3, unblockable: true }),
+    ]);
+    expect(hp(s, "AI")).toBe(37);
+  });
+  it("Guillotine ignores even Divine Protection", () => {
+    const s = makeState({ hand: ["guillotine#1"] }, { hand: ["divine_protection#1"] });
+    play(s, ["guillotine#1"], ["divine_protection#1"]);
+    expect(hp(s, "AI")).toBe(27);
+  });
+  it("Shield Bash deals damage and gives its owner Block", () => {
+    const s = makeState({ hand: ["shield_bash#1"] }, { hand: ["heavy_strike#1"] });
+    const r = play(s, ["shield_bash#1"], ["heavy_strike#1"]);
+    expect(r.blockGained.HUMAN).toBe(3);
+    expect(hp(s, "HUMAN")).toBe(39);
+    expect(hp(s, "AI")).toBe(38);
+  });
+  it("Draining Bite heals 2 (capped at 40) and the heal is recorded", () => {
+    const s = makeState({ hand: ["draining_bite#1"], hp: 35 });
+    const r = play(s, ["draining_bite#1"], []);
+    expect(hp(s, "HUMAN")).toBe(37);
+    expect(r.heals).toEqual([{ target: "HUMAN", source: "CARD", amount: 2 }]);
+  });
+  it("Rending Claw and Toxic Cloud apply Poison (still one status)", () => {
+    const s = makeState({ hand: ["rending_claw#1", "toxic_cloud#1"] });
+    play(s, ["rending_claw#1", "toxic_cloud#1"], []);
+    expect(s.players.AI.statuses.filter((x) => x.kind === "POISON")).toHaveLength(1);
+    expect(hp(s, "AI")).toBe(40 - 4 - 1);
+  });
+  it("Tactical Retreat gives Block and draws 1", () => {
+    const s = makeState({ hand: ["tactical_retreat#1"] });
+    const r = play(s, ["tactical_retreat#1"], []);
+    expect(r.blockGained.HUMAN).toBe(4);
+    expect(r.drawn.HUMAN).toHaveLength(1);
+  });
+  it("Mirror Shield blocks 6 and reflects the HP damage that gets through", () => {
+    const s = makeState({ hand: ["mirror_shield#1"] }, { hand: ["crushing_blow#1"] });
+    play(s, ["mirror_shield#1"], ["crushing_blow#1"]);
+    expect(hp(s, "HUMAN")).toBe(35);
+    expect(hp(s, "AI")).toBe(35);
+  });
+  it("Second Wind heals 4 and blocks 5", () => {
+    const s = makeState({ hand: ["second_wind#1"], hp: 30 }, { hand: ["cleave#1"] });
+    play(s, ["second_wind#1"], ["cleave#1"]);
+    expect(hp(s, "HUMAN")).toBe(30 - 2 + 4);
+  });
+  it("Fireball deals 9 Spell damage through Block", () => {
+    const s = makeState({ hand: ["fireball#1"] }, { hand: ["iron_skin#1"] });
+    play(s, ["fireball#1"], ["iron_skin#1"]);
+    expect(hp(s, "AI")).toBe(31);
   });
 });

@@ -45,7 +45,8 @@ All art is optional. Drop files into `web/public/` with the names in
 | Energy | 5 every turn, does not carry over |
 | Cards per turn | 0, 1 or 2, total cost ≤ 5 |
 | Selection | Simultaneous and hidden; revealed together once both are locked |
-| Decks | Identical 22-card composition, separate independently shuffled copies |
+| Decks | Identical **60-card** deck (30 different cards × 2), separate independently shuffled copies |
+| Deck building | Max **60 cards**, max **2 copies** of any card (`validateDeck`, enforced at match creation) |
 | **Deck-out defeat** | At the End phase, a player with **1 or fewer cards left in their draw pile loses** |
 | Draw (both defeated the same turn — by HP, deck-out, or one of each) | Recorded as `DRAW`, settled as a **human loss** (house rule) |
 
@@ -53,25 +54,43 @@ All art is optional. Drop files into `web/public/` with the names in
 pool and the target's Block is subtracted once (`max(0, attack − block)`), so card order never
 matters. Spell damage, Poison, and reflected damage ignore Block. Block expires at end of turn.
 
-### Cards (deck-v2)
+### Cards (deck-v3 — every card ×2)
 
-| Card | Type | Cost | Effect | In deck |
-| --- | --- | --- | --- | --- |
-| Quick Strike | Attack | 1 | 2 damage | 2 |
-| Heavy Strike | Attack | 2 | 4 damage | 3 |
-| Meteor Impact | Attack | 5 | 20 damage | 1 |
-| Venom Strike | Attack | 3 | 1 damage + Poison (applies even if blocked) | 2 |
-| Basic Shield | Defense | 1 | 3 Block | 2 |
-| Fortify | Defense | 2 | 6 Block | 2 |
-| Arcane Barrier | Defense | 3 | 10 Block | 1 |
-| Divine Protection | Defense | 5 | 20 Block | 1 |
-| Arcane Bolt | Spell | 3 | 5 Spell damage | 1 |
-| Regeneration | Spell | 2 | Heal 2 at End phase, 3 turns | 1 |
-| Disruption | Spell | 3 | Opponent discards 2 random cards (caster doesn't see which) | 1 |
-| Arcane Insight | Spell | 1 | Draw 2 cards (after Disruption; respects the 7-card hand limit; opponent only sees the count) | 2 |
-| Unstoppable | Spell | 2 | Your Attack damage this turn is unblockable | 1 |
-| Reflection | Spell | 3 | This turn, HP damage you take from cards is dealt back | 1 |
-| Lifesteal | Spell | 2 | This turn + next, heal for HP damage your cards deal | 1 |
+Cards can combine effects (e.g. damage + Block). The engine resolves effects in its fixed phase
+order below, never in the order they're listed on the card. Poison = 1/turn for 3 turns, refreshes, never stacks.
+
+| Card | Type | Cost | Effect |
+| --- | --- | --- | --- |
+| Quick Strike | Attack | 1 | 2 damage |
+| Heavy Strike | Attack | 2 | 4 damage |
+| Shield Bash | Attack | 2 | 2 damage + 3 Block |
+| Piercing Arrow | Attack | 2 | 3 **unblockable** damage |
+| Venom Strike | Attack | 3 | 1 damage + Poison (applies even if blocked) |
+| Cleave | Attack | 3 | 7 damage |
+| Rending Claw | Attack | 3 | 4 damage + Poison |
+| Draining Bite | Attack | 3 | 4 damage + heal 2 |
+| Crushing Blow | Attack | 4 | 11 damage |
+| Phantom Lance | Attack | 4 | 7 unblockable damage |
+| Guillotine | Attack | 5 | 13 unblockable damage |
+| Meteor Impact | Attack | 5 | 20 damage |
+| Basic Shield | Defense | 1 | 3 Block |
+| Bandage | Defense | 1 | 1 Block + heal 2 |
+| Fortify | Defense | 2 | 6 Block |
+| Tactical Retreat | Defense | 2 | 4 Block + draw 1 |
+| Arcane Barrier | Defense | 3 | 10 Block |
+| Second Wind | Defense | 3 | 5 Block + heal 4 |
+| Iron Skin | Defense | 4 | 14 Block |
+| Mirror Shield | Defense | 4 | 6 Block + Reflection this turn |
+| Divine Protection | Defense | 5 | 20 Block |
+| Arcane Insight | Spell | 1 | Draw 2 (after Disruption; respects hand limit; opponent sees only the count) |
+| Toxic Cloud | Spell | 2 | Poison |
+| Regeneration | Spell | 2 | Heal 2 at End phase, 3 turns |
+| Unstoppable | Spell | 2 | All your Attack damage this turn is unblockable |
+| Lifesteal | Spell | 2 | This turn + next, heal for HP damage your cards deal |
+| Arcane Bolt | Spell | 3 | 5 Spell damage |
+| Disruption | Spell | 3 | Opponent discards 2 random cards (caster doesn't see which) |
+| Reflection | Spell | 3 | This turn, HP damage you take from cards is dealt back |
+| Fireball | Spell | 4 | 9 Spell damage |
 
 Values live in `server/src/engine/cards.ts` and `server/src/engine/rules.ts`.
 
@@ -82,8 +101,8 @@ Values live in `server/src/engine/cards.ts` and `server/src/engine/rules.ts`.
 3. **Reveal + resolution** (both sides from the same snapshot):
    1. re-validate both selections · 2. consume cards & energy · 3. Block and flags (Unstoppable, Reflection, Lifesteal, Regeneration) ·
    4. random discard (Disruption) from the *remaining* hand — committed cards can't be invalidated · 4b. card draw (Arcane Insight) ·
-   5–7. shared Attack pool vs Block (unblockable if Unstoppable), apply Poison · 8. Spell damage ·
-   9. Reflection, then Lifesteal (from actual HP damage) · 10. Regeneration · 11. Poison ticks · 12. expire Block/statuses · 13. outcome — a side is defeated if HP ≤ 0 **or** its draw pile has ≤ 1 card.
+   5–7. blockable Attack damage → one shared pool vs Block; unblockable Attack damage (card flag or Unstoppable) skips Block; apply Poison · 8. Spell damage ·
+   9. Reflection, then Lifesteal (from actual HP damage) · 10. instant card heals, then Regeneration · 11. Poison ticks · 12. expire Block/statuses · 13. outcome — a side is defeated if HP ≤ 0 **or** its draw pile has ≤ 1 card.
 4. Both sides' committed effects always resolve, even if someone hits 0 HP mid-turn.
 
 ## Proposed defaults (spec left these open)
@@ -93,7 +112,7 @@ These are deliberate choices, centralised so the product owner can change them:
 | Topic | Default | Where |
 | --- | --- | --- |
 | Turn-1 draw | Yes — turn 1 starts with 6 cards in hand | `engine.ts` `startPhase` |
-| Deck size / list | 22 cards as above | `cards.ts` `DECK_COMPOSITION` |
+| Deck list | 60 cards = 30 cards × 2; new card values are prototypes | `cards.ts` |
 | Deck-out threshold | ≤ 1 card at the End phase = defeat (`RULES.deckOutThreshold`) | `rules.ts` |
 | Hand overflow | Draw skipped (card stays in deck), shown in UI | `engine.ts` |
 | Poison | 1 dmg/tick, 3 End phases incl. the turn applied; reapply refreshes, never stacks | `rules.ts` |
@@ -101,9 +120,9 @@ These are deliberate choices, centralised so the product owner can change them:
 | Reflection | Reflects actual HP damage from Attack+Spell cards; ignores Block; cannot be re-reflected; doesn't reflect Poison | `engine.ts` |
 | Lifesteal | Heals actual HP damage dealt by own Attack+Spell cards; not Poison/Reflect | `engine.ts` |
 | Healing vs lethal | Healing cannot revive a player whose HP is ≤ 0 after damage | `engine.ts` `heal` |
-| Turn limit | 30 turns; then higher HP wins, equal HP = DRAW (effectively unreachable now — deck-out ends matches first) | `rules.ts` |
+| Turn limit | 60 turns; then higher HP wins, equal HP = DRAW (deck-out at ~turn 54 comes first) | `rules.ts` |
 | Timeout | Human auto-passes after 60 s | `rules.ts`, `session.ts` |
-| Spell costs | Regeneration 2, Disruption 3, Unstoppable 2, Reflection 3, Lifesteal 2, Arcane Bolt 3 | `cards.ts` |
+| Card costs/values | All non-spec cards (see table) are proposed prototypes | `cards.ts` |
 | Public counts | Hand size, deck remaining and discard count are public (never identities/order) | `projection.ts` |
 
 ## Architecture
@@ -150,11 +169,9 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 - Matches are in memory; a server restart loses them. No accounts, no wallet, no stakes.
 - The AI is a simple heuristic (`heuristic-v1`) with small private-RNG tie-breaking; it's not tuned.
 - Balance is untested: flat 5 energy means Meteor Impact is playable from turn 1.
-- **Deck-out dominates.** Both decks shrink 1/turn in lockstep, so unless a draw spell or a skipped (hand-full)
-  draw makes them differ, both sides deck out on the same End phase → DRAW → human loss. In a 2,000-match
-  AI-vs-AI simulation: ~84% of matches ended by deck-out, ~40% were draws (avg ~12 turns). Consider a tiebreak
-  (e.g. higher HP wins a mutual deck-out) before real stakes.
-- Timing side-channels are reduced (AI commits at turn start) but not formally analysed.
+- **Simulated balance (2,000 AI-vs-AI matches, deck-v3).** Avg ~9 turns; ~45% / ~42% win split between the
+  two seats, ~13% DRAW (mutual KO → human loss). Deck-out no longer triggers in practice with 60 cards
+  (it did in ~84% of matches with the old 22-card deck).
 
 ## Roadmap
 

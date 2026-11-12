@@ -6,10 +6,12 @@ import { ShieldIcon, SwordIcon, TypeIcon } from "./icons";
 
 const TYPE_LABEL = { ATTACK: "Attack", DEFENSE: "Defense", SPELL: "Spell" } as const;
 
+/** Headline number for the corner badge: damage if the card deals any, else Block. */
 function statOf(def: CardDefinition): { icon: "sword" | "shield"; value: number } | null {
-  const e = def.effect;
-  if (e.kind === "DAMAGE" || e.kind === "DAMAGE_AND_POISON") return { icon: "sword", value: e.amount };
-  if (e.kind === "GAIN_BLOCK") return { icon: "shield", value: e.amount };
+  const dmg = def.effects.reduce((s, e) => s + (e.kind === "DAMAGE" ? e.amount : 0), 0);
+  if (dmg > 0) return { icon: "sword", value: dmg };
+  const block = def.effects.reduce((s, e) => s + (e.kind === "GAIN_BLOCK" ? e.amount : 0), 0);
+  if (block > 0) return { icon: "shield", value: block };
   return null;
 }
 
