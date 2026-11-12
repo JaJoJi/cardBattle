@@ -20,6 +20,21 @@ npm run build && npm start   # production build served by the server → http://
 npm test             # engine, privacy and session tests (vitest)
 ```
 
+## Screens
+
+- **Vault (home)** — house-vault stats, stake tiers (Bronze 1 / Silver 5 / Gold 25 / Mythic 100 USDC, 1.9× win payout),
+  payout rules and recent settlements. **All vault numbers are mock data** from `web/src/data/mockVault.ts`; no funds move.
+  Shows a "Continue match" banner if a match is in progress.
+- **Match board** — felt table with the AI seat (HP orb, card backs, deck), arena lanes (AI lock seal vs your chosen
+  cards), your seat (HP orb, energy crystals, deck), a fanned hand, a reveal overlay with card-flip after each turn,
+  a battle log, and a game-over screen with the mock payout.
+
+### Art placeholders
+
+All art is optional. Drop files into `web/public/` with the names in
+[`web/public/ASSETS.md`](web/public/ASSETS.md) (`cards/<card-id>.png`, `cards/back.png`, `avatars/player.png`,
+`avatars/ai.png`, `vault/emblem.png`); anything missing falls back to a styled placeholder. Paths live in `web/src/assets.ts`.
+
 ## How to play
 
 | Rule | Value |
@@ -104,6 +119,11 @@ server/                    Node + TypeScript, authoritative
   src/index.ts             HTTP (serves web/dist) + WebSocket /ws
   tests/                   engine, privacy/randomness, session tests
 web/                       React + Vite client (renders projections, submits actions)
+  src/pages/VaultPage.tsx  home: mock vault stats, stake tiers, settlements
+  src/pages/MatchPage.tsx  game board, hand, reveal overlay, game over
+  src/components/          GameCard, Hud (HP orb, energy, portraits), BattleLog, RevealOverlay
+  src/data/mockVault.ts    MOCK vault data (replace with on-chain reads)
+  public/ASSETS.md         expected art file names
 ```
 
 Protocol (`server/src/protocol.ts`): client sends `new-match`, `resume {token}`, `commit {turn, cards}`;
