@@ -2,3 +2,4 @@ target/
 .anchor/
 test-ledger/
 node_modules/
+build.log

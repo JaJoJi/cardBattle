@@ -10,7 +10,11 @@ import { chooseCards } from "../src/ai/bot";
 import { loadChainConfig } from "../src/chain/config";
 import { ArenaHouse, USDC } from "../src/chain/house";
 import { OnChainMatch, type ChainPhase } from "../src/chain/onchainMatch";
-import { createSeededRng } from "../src/engine/rng";
+import { createMatchRngs, createSeededRng, shuffle } from "../src/engine/rng";
+import { canonicalDeck, DECK_VERSION } from "../src/engine/cards";
+import { RULES } from "../src/engine/rules";
+import { MatchVrf, deriveVrfMaster } from "../src/chain/vrf";
+import { seedCommitment } from "../src/session";
 
 const cfg = loadChainConfig();
 if (!cfg.house) {
@@ -20,7 +24,8 @@ if (!cfg.house) {
 const connection = new Connection(cfg.rpcUrl, "confirmed");
 const house = new ArenaHouse(connection, cfg.house);
 const STAKE = 1 * USDC;
-const ALL = ["house-wins", "player-wins", "cancel", "refund", "restart"];
+const ALL = ["house-wins", "player-wins", "cancel", "refund", "restart", "vrf"];
+const vrfClient = cfg.vrfProgramId ? new MatchVrf(connection, cfg.house) : null;
 const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 
 const hb = await house.balances();
@@ -46,7 +51,7 @@ console.log(`Player ${player.publicKey.toBase58()} funded: ${await usdcOf(player
 // ---------------------------------------------------------------- helpers
 const TERMINAL: ChainPhase[] = ["settled", "failed", "cancelled"];
 
-function newMatch(log = true) {
+function newMatch(log = true, useVrf = false) {
   return track(new OnChainMatch(
     house,
     player.publicKey,
@@ -56,6 +61,9 @@ function newMatch(log = true) {
       if (log && t && t.status !== "pending") console.log(`    [${m.status.phase}] ${t.label}: ${t.status}${t.error ? ` — ${t.error}` : ""}`);
     },
     () => {},
+    undefined,
+    undefined,
+    useVrf ? vrfClient ?? undefined : undefined,
   ));
 }
 
@@ -198,6 +206,29 @@ for (const name of scenarios) {
       const s = await arenaSummary(r.arenaId!);
       check(name, sameTurn && r.status.phase === "settled" && failedTx.length === 0, `arena #${r.arenaId}: resumed at turn ${turnBefore}, ${s}${failedTx.length ? `; failed: ${failedTx.map((t) => t.label).join(", ")}` : ""}`);
       r.dispose();
+    } else if (name === "vrf") {
+      if (!vrfClient) {
+        check(name, false, "CARDBATTLE_VRF_PROGRAM_ID not set");
+        continue;
+      }
+      const m = newMatch(true, true);
+      await enterAndStart(m);
+      const opening = m.session.humanView().view.self.hand.map((c) => c.uid);
+      playOut(m, false, "pass");
+      await until(m, () => TERMINAL.includes(m.status.phase));
+      // Independent verification from public data: on-chain VRF account + revealed entropy.
+      const acc = (await vrfClient.read(m.arenaId!))!;
+      const entropy = Buffer.from(m.status.seedReveal!, "hex");
+      const commitOk = acc.commitment.toString("hex") === seedCommitment(entropy, m.session.matchId);
+      const master = deriveVrfMaster(entropy, acc.randomness, m.session.matchId);
+      const deck = shuffle(canonicalDeck(), createMatchRngs(m.session.matchId, { rules: RULES.version, deck: DECK_VERSION }, master).humanDeck);
+      const dealOk = JSON.stringify(deck.slice(0, 6)) === JSON.stringify(opening);
+      const s = await arenaSummary(m.arenaId!);
+      check(
+        name,
+        m.status.phase === "settled" && acc.fulfilled && commitOk && dealOk,
+        `arena #${m.arenaId}: VRF ${m.status.vrf?.account} fulfilled=${acc.fulfilled}, commitment ok=${commitOk}, opening hand re-derived=${dealOk}; ${s}`,
+      );
     } else {
       console.log(`  unknown scenario ${name}`);
     }

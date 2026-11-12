@@ -8,7 +8,8 @@ and web client, with two play modes you can toggle in the top bar:
 - **On-chain (devnet)** — staked matches settled through the deployed **RitArena program on
   Solana devnet** using `@ritarena/sdk`, with test USDC. See [On-chain mode](#on-chain-mode-solana-devnet).
 
-MagicBlock VRF / Private Ephemeral Rollups are not integrated yet (see [Roadmap](#roadmap)).
+Staked matches are shuffled with **MagicBlock VRF** (see [Randomness](#randomness-magicblock-vrf)).
+MagicBlock Private Ephemeral Rollups (private hands) are not integrated yet (see [Roadmap](#roadmap)).
 
 ## Quick start
 
@@ -75,7 +76,33 @@ the server replays it to the exact same state and resumes from the saved phase:
 
 Players reconnect to the same match automatically (their session token survives the restart).
 
-**Verifiable shuffle:** the secret seed's commitment is posted before turn 1 and the seed is
+### Randomness (MagicBlock VRF)
+
+Staked matches use a small companion program, **`cardbattle_vrf`**
+(`Ffw8AgNQn4iCYTeLuS8off5SzqSfdnexHZMx3BjpegL4` on devnet, source in `onchain/`), built on
+MagicBlock's `ephemeral-rollups-sdk` 0.17.3 (VRF feature). It holds no funds and doesn't touch RitArena.
+
+1. After **both** stakes are in (arena still in Registration), the house sends one transaction that
+   stores `commitment = sha256(entropy ‖ matchId)` in a per-arena account **and** requests VRF with
+   that commitment as the `caller_seed`. The house is bound to its secret entropy before the VRF output exists.
+2. MagicBlock's oracle calls back `consume_match_randomness` (only the scoped VRF identity can, via
+   `#[vrf_callback]`) and the verified 32-byte output is stored on-chain (~3 s on devnet).
+3. The match seed is `sha256("RITARENA_SEED_V2" ‖ entropy ‖ vrf ‖ matchId)`: the house can't grind it,
+   the oracle can't predict it, and the deck order stays private because the entropy is secret.
+4. Only then is the arena started. If VRF never arrives, the arena is cancelled and both stakes refunded.
+5. At the end the entropy is revealed; anyone can check it against the on-chain commitment, read the
+   VRF output from the account, and reproduce both decks (`npm run chain:smoke -- vrf` does exactly this).
+
+Rebuild / redeploy (WSL): `onchain/` is an Anchor 1.0.2 workspace; `anchor build`, then
+`solana program deploy target/deploy/cardbattle_vrf.so --program-id target/deploy/cardbattle_vrf-keypair.json`
+with the house key as upgrade authority. Set `CARDBATTLE_VRF_PROGRAM_ID` in `server/.env`; without it,
+staked matches fall back to the server-seed commit-reveal below.
+
+**Remaining trust:** the house still learns the decks once VRF lands (it runs the game), so before
+starting it *could* cancel a match whose decks it dislikes — both stakes are refunded and the cancel is
+public, but it is a free option. Closing that needs the game itself to run in a TEE / MagicBlock PER.
+
+**Verifiable shuffle (fallback without VRF):** the secret seed's commitment is posted before turn 1 and the seed is
 revealed when the match ends (shown in the match's chain panel). `sha256(seed ‖ matchId)` must
 equal the commitment, and `createMatchRngs(matchId, versions, seed)` reproduces both decks.
 
@@ -86,7 +113,7 @@ cd server
 npm run chain:keygen        # creates a devnet house wallet in server/.env (gitignored)
 # fund the printed address with devnet SOL at https://faucet.solana.com (≈1 SOL)
 npm run chain:setup         # registers the house profile, mints 1,000 test USDC
-npm run chain:smoke         # devnet checks: house-wins, player-wins (+claim), cancel, refund, restart
+npm run chain:smoke         # devnet checks: house-wins, player-wins (+claim), cancel, refund, restart, vrf
 npm run chain:claim -- <id> # recover a house win whose claim step failed (safe to re-run)
 cd .. && npm run build && npm start
 ```
@@ -252,7 +279,7 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
   the oracle's word. The per-turn Merkle roots let a full log be checked later; they don't prove correct play.
 - The house wallet is also the arena oracle (it reports the result of a match it is playing in). That's inherent to the
   current RitArena oracle model; an independent oracle or PER/TEE execution is the next step.
-- Randomness is server-local CSPRNG (committed before play in on-chain mode), not VRF.
+- Randomness: MagicBlock VRF + house entropy for staked matches (see above); practice mode uses a local CSPRNG.
 - Staked matches are persisted to local disk (single server). Running several server instances would need a shared store.
 - Matches are in memory; a server restart loses them. No accounts, no wallet, no stakes.
 - The AI is a simple heuristic (`heuristic-v1`) with small private-RNG tie-breaking; it's not tuned.
@@ -264,7 +291,7 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 ## Roadmap
 
 1. ~~Settlement via the RitArena program~~ — done for devnet (on-chain mode).
-2. **MagicBlock VRF + PER proof of concept** — verify per-identity private reads, private VRF consumption, and commit-back; commit to `hash(privateEntropy)` before requesting VRF to prevent grinding.
+2. ~~MagicBlock VRF~~ — done (devnet). Next: **MagicBlock PER** for hidden hands / game execution — verify per-identity private reads, private VRF consumption, and commit-back; commit to `hash(privateEntropy)` before requesting VRF to prevent grinding.
 3. ~~Persist on-chain matches~~ — done. Next: separate the oracle from the house wallet.
 4. Wallet-adapter support beyond Phantom; end-to-end browser tests.
 5. Legal review of human-vs-house real-money play before any mainnet stakes.

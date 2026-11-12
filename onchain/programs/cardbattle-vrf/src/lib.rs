@@ -23,7 +23,7 @@ use ephemeral_rollups_sdk::vrf::{
     types::SerializableAccountMeta,
 };
 
-declare_id!("11111111111111111111111111111111");
+declare_id!("Ffw8AgNQn4iCYTeLuS8off5SzqSfdnexHZMx3BjpegL4");
 
 pub const MATCH_RNG_SEED: &[u8] = b"match_rng";
 
