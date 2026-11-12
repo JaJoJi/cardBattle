@@ -1,13 +1,16 @@
-// End-to-end devnet check of the on-chain flow without a browser wallet.
-// Uses the funded house wallet plus a throwaway player keypair:
-//   fund player (0.05 SOL from house) → player mints test USDC → create arena →
-//   player enters → house enters + starts → play (player passes) → finalize → claims.
-// Usage: npm run chain:smoke   (requires `npm run chain:setup` first)
-import { Connection, Keypair, LAMPORTS_PER_SOL, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
-import { RitArena, arenaStateLabel } from "@ritarena/sdk";
+// End-to-end devnet checks of the on-chain flow without a browser wallet.
+// A throwaway player keypair (funded by the house) plays real staked matches.
+//
+// Usage: npm run chain:smoke [-- house-wins player-wins cancel refund restart]
+//        (no args = all scenarios)
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import { getAssociatedTokenAddress } from "@solana/spl-token";
+import { RitArena, arenaStateLabel, pdas } from "@ritarena/sdk";
+import { chooseCards } from "../src/ai/bot";
 import { loadChainConfig } from "../src/chain/config";
 import { ArenaHouse, USDC } from "../src/chain/house";
-import { OnChainMatch } from "../src/chain/onchainMatch";
+import { OnChainMatch, type ChainPhase } from "../src/chain/onchainMatch";
+import { createSeededRng } from "../src/engine/rng";
 
 const cfg = loadChainConfig();
 if (!cfg.house) {
@@ -17,60 +20,196 @@ if (!cfg.house) {
 const connection = new Connection(cfg.rpcUrl, "confirmed");
 const house = new ArenaHouse(connection, cfg.house);
 const STAKE = 1 * USDC;
+const ALL = ["house-wins", "player-wins", "cancel", "refund", "restart"];
+const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 
 const hb = await house.balances();
 console.log(`House ${house.publicKey.toBase58()}: ${hb.sol} SOL, ${hb.usdc} USDC`);
-if (hb.sol < 0.15 || hb.usdc < 1) {
-  console.error("House needs ≥0.15 SOL and ≥1 test USDC. Run `npm run chain:setup` after funding.");
+if (hb.sol < 0.5 || hb.usdc < 10) {
+  console.error("House needs ≥0.5 SOL and ≥10 test USDC for the full smoke run.");
   process.exit(1);
 }
 
-// 1. Throwaway player, funded by the house for fees + rent.
+// ---------------------------------------------------------------- player setup
 const player = Keypair.generate();
 await sendAndConfirmTransaction(
   connection,
-  new Transaction().add(SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: player.publicKey, lamports: 0.05 * LAMPORTS_PER_SOL })),
+  new Transaction().add(SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: player.publicKey, lamports: 0.15 * LAMPORTS_PER_SOL })),
   [cfg.house],
 );
 const playerSdk = RitArena.fromKeypair(connection, player);
 await playerSdk.registerProfile("Smoke Player");
-await playerSdk.mintTestUsdc(5 * USDC);
-console.log(`Player ${player.publicKey.toBase58()} funded`);
+await playerSdk.mintTestUsdc(20 * USDC);
+const usdcOf = async (pk: PublicKey) => (await house.balances(pk)).usdc;
+console.log(`Player ${player.publicKey.toBase58()} funded: ${await usdcOf(player.publicKey)} USDC\n`);
 
-// 2. Drive a real OnChainMatch exactly as the server does.
-let done: () => void;
-const finished = new Promise<void>((r) => (done = r));
-const match = new OnChainMatch(
-  house,
-  player.publicKey,
-  STAKE,
-  (m) => {
-    const last = m.status.txs.at(-1);
-    if (last) console.log(`  [${m.status.phase}] ${last.label}: ${last.status}${last.sig ? ` ${last.sig}` : ""}${last.error ? ` — ${last.error}` : ""}`);
-    if (["settled", "failed", "cancelled"].includes(m.status.phase)) done();
-  },
-  () => {},
-);
-await match.begin();
-if (match.status.phase !== "awaiting-entry") process.exit(1);
-console.log(`Arena #${match.arenaId} created; player entering…`);
-console.log("  player enter:", await playerSdk.enterArena(match.arenaId!));
-await match.checkEntry();
+// ---------------------------------------------------------------- helpers
+const TERMINAL: ChainPhase[] = ["settled", "failed", "cancelled"];
 
-// 3. Play: the player passes every turn until the match ends (house AI wins).
-let guard = 0;
-while (!match.session.finished && guard++ < 100) {
-  const t = match.session.humanView().view.turn;
-  const r = match.session.commitHuman(t, []);
-  if (!r.ok) throw new Error(r.reason);
+function newMatch(log = true) {
+  return track(new OnChainMatch(
+    house,
+    player.publicKey,
+    STAKE,
+    (m) => {
+      const t = m.status.txs.at(-1);
+      if (log && t && t.status !== "pending") console.log(`    [${m.status.phase}] ${t.label}: ${t.status}${t.error ? ` — ${t.error}` : ""}`);
+    },
+    () => {},
+  ));
 }
-console.log(`Match over after ${match.session.humanView().view.lastTurn?.turn} turns: ${match.session.outcome.outcome}`);
-await finished;
 
-const arena = await house.sdk.getArena(match.arenaId!);
-console.log(`Arena #${match.arenaId} state: ${arena ? arenaStateLabel(arena.state) : "?"}, rounds: ${arena?.currentRound}`);
-console.log(`Seed commitment ${match.status.seedCommitment}\nSeed reveal      ${match.status.seedReveal}`);
-const ok = (match.status.phase as string) === "settled";
-console.log(ok ? "SMOKE TEST PASSED" : `SMOKE TEST FAILED: ${match.status.error}`);
-match.dispose();
-process.exit(ok ? 0 : 1);
+async function until(m: OnChainMatch, pred: () => boolean, ms = 120_000) {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error(`timeout in phase ${m.status.phase}`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+async function enterAndStart(m: OnChainMatch) {
+  await m.begin();
+  if (m.status.phase !== "awaiting-entry") throw new Error(`create failed: ${m.status.error}`);
+  await playerSdk.enterArena(m.arenaId!);
+  await house.waitUntil(() => house.hasEntered(m.arenaId!, player.publicKey), "player entry");
+  await m.checkEntry();
+  if ((m.status.phase as string) !== "playing") throw new Error(`start failed in phase ${m.status.phase}: ${m.status.error ?? "no error"}`);
+}
+
+/** Plays to the end. `smart` = the player uses the same heuristic as the AI. */
+function playOut(m: OnChainMatch, smart: boolean, seed: string) {
+  const rng = createSeededRng(Buffer.from(seed));
+  let guard = 0;
+  while (!m.session.finished && guard++ < 100) {
+    const view = m.session.humanView().view;
+    const r = m.session.commitHuman(view.turn, smart ? chooseCards(view, rng) : []);
+    if (!r.ok) throw new Error(r.reason);
+  }
+}
+
+async function arenaSummary(id: number) {
+  const a = await house.sdk.getArena(id);
+  const entries = await house.sdk.getArenaEntries(id);
+  const who = (pk: PublicKey) => (pk.equals(house.publicKey) ? "house" : "player");
+  return `${a ? arenaStateLabel(a.state) : "?"}, rounds ${a?.currentRound}, ` + entries.map((e) => `${who(e.owner)}: rank ${e.prizeRank} claimed ${e.prizeClaimed} refunded ${e.refunded}`).join("; ");
+}
+
+// ---------------------------------------------------------------- scenarios
+const results: Record<string, string> = {};
+const check = (name: string, ok: boolean, detail: string) => {
+  results[name] = `${ok ? "PASS" : "FAIL"} — ${detail}`;
+  console.log(`  => ${results[name]}\n`);
+};
+
+const live: OnChainMatch[] = [];
+const track = <T extends OnChainMatch>(m: T) => (live.push(m), m);
+
+for (const name of scenarios) {
+  console.log(`▶ ${name}`);
+  await new Promise((r) => setTimeout(r, 3_000)); // pace scenarios for public RPC limits
+  try {
+    if (name === "house-wins") {
+      const m = newMatch();
+      await enterAndStart(m);
+      playOut(m, false, "pass");
+      await until(m, () => TERMINAL.includes(m.status.phase));
+      const s = await arenaSummary(m.arenaId!);
+      check(name, m.status.phase === "settled" && m.status.winner === "HOUSE" && /house: rank 1 claimed true/.test(s), `arena #${m.arenaId}: ${s}`);
+      m.dispose();
+    } else if (name === "player-wins") {
+      let won: OnChainMatch | null = null;
+      for (let attempt = 1; attempt <= 6 && !won; attempt++) {
+        const m = newMatch(false);
+        await enterAndStart(m);
+        playOut(m, true, `smart-${attempt}-${Date.now()}`);
+        await until(m, () => TERMINAL.includes(m.status.phase));
+        console.log(`    attempt ${attempt}: arena #${m.arenaId} → ${m.status.winner} (${m.session.outcome.outcome})`);
+        if (m.status.winner === "PLAYER") won = m;
+        else m.dispose();
+      }
+      if (!won) {
+        check(name, false, "player did not win in 6 attempts (heuristic vs heuristic) — re-run");
+        continue;
+      }
+      const before = await usdcOf(player.publicKey);
+      const sig = await playerSdk.claimPrize(won.arenaId!);
+      const want = before + won.status.payoutMicro / USDC;
+      await house.waitUntil(async () => (await usdcOf(player.publicKey)) >= want - 1e-6, "player prize");
+      const after = await usdcOf(player.publicKey);
+      const s = await arenaSummary(won.arenaId!);
+      check(name, Math.abs(after - before - won.status.payoutMicro / USDC) < 1e-6, `arena #${won.arenaId}: claimed ${after - before} USDC (${sig.slice(0, 16)}…); ${s}`);
+      won.dispose();
+    } else if (name === "cancel") {
+      const m = newMatch();
+      await m.begin();
+      await m.cancelByPlayer();
+      await house.waitUntil(async () => "cancelled" in ((await house.sdk.getArena(m.arenaId!))?.state ?? {}), "cancel");
+      const s = await arenaSummary(m.arenaId!);
+      check(name, m.status.phase === "cancelled" && s.startsWith("Cancelled"), `arena #${m.arenaId}: ${s}`);
+      m.dispose();
+    } else if (name === "refund") {
+      // Player stakes, then the arena is cancelled before the house enters (what the server
+      // does when the house can't enter). The player signs refund_entry.
+      const m = newMatch();
+      await m.begin();
+      await playerSdk.enterArena(m.arenaId!);
+      await house.waitUntil(() => house.hasEntered(m.arenaId!, player.publicKey), "player entry");
+      await house.cancel(m.arenaId!);
+      await house.waitUntil(async () => "cancelled" in ((await house.sdk.getArena(m.arenaId!))?.state ?? {}), "cancel");
+      const before = await usdcOf(player.publicKey);
+      const arenaPda = pdas.arena(m.arenaId!);
+      const arena = (await house.sdk.getArena(m.arenaId!))!;
+      const program = (playerSdk as unknown as { program: { methods: { refundEntry(): { accountsPartial(a: object): { rpc(): Promise<string> } } } } }).program;
+      await program.methods
+        .refundEntry()
+        .accountsPartial({
+          agentOwner: player.publicKey,
+          arena: arenaPda,
+          arenaEntry: pdas.arenaEntry(arenaPda, pdas.agentProfile(player.publicKey)),
+          arenaVault: pdas.arenaVault(arenaPda),
+          agentUsdc: await getAssociatedTokenAddress(arena.usdcMint, player.publicKey),
+          usdcMint: arena.usdcMint,
+        })
+        .rpc();
+      await house.waitUntil(async () => (await usdcOf(player.publicKey)) >= before + STAKE / USDC - 1e-6, "refund");
+      const after = await usdcOf(player.publicKey);
+      const s = await arenaSummary(m.arenaId!);
+      check(name, Math.abs(after - before - STAKE / USDC) < 1e-6, `arena #${m.arenaId}: refunded ${after - before} USDC; ${s}`);
+      m.dispose();
+    } else if (name === "restart") {
+      // Play 3 turns, "crash" (drop the object), restore from the snapshot, finish.
+      const m = newMatch();
+      await enterAndStart(m);
+      for (let t = 1; t <= 3 && !m.session.finished; t++) m.session.commitHuman(m.session.humanView().view.turn, []);
+      await until(m, () => m.status.txs.filter((t) => t.status === "ok" && t.label.startsWith("Commit")).length >= 2, 60_000);
+      const snap = m.snapshot();
+      const turnBefore = m.session.humanView().view.turn;
+      m.dispose();
+      console.log(`    simulated crash at turn ${turnBefore}; restoring…`);
+      const r = track(OnChainMatch.restore(house, snap, (x) => {
+        const t = x.status.txs.at(-1);
+        if (t && t.status !== "pending") console.log(`    [restored:${x.status.phase}] ${t.label}: ${t.status}${t.error ? ` — ${t.error}` : ""}`);
+      }, () => {}));
+      const sameTurn = r.session.humanView().view.turn === turnBefore;
+      await r.resume();
+      playOut(r, false, "pass");
+      await until(r, () => TERMINAL.includes(r.status.phase));
+      const failedTx = r.status.txs.filter((t) => t.status === "failed");
+      const s = await arenaSummary(r.arenaId!);
+      check(name, sameTurn && r.status.phase === "settled" && failedTx.length === 0, `arena #${r.arenaId}: resumed at turn ${turnBefore}, ${s}${failedTx.length ? `; failed: ${failedTx.map((t) => t.label).join(", ")}` : ""}`);
+      r.dispose();
+    } else {
+      console.log(`  unknown scenario ${name}`);
+    }
+  } catch (e) {
+    check(name, false, (e as Error).message);
+  } finally {
+    for (const m of live.splice(0)) m.dispose(); // stop pollers even when a scenario fails
+  }
+}
+
+console.log("Summary:");
+for (const [k, v] of Object.entries(results)) console.log(`  ${k.padEnd(12)} ${v}`);
+const final = await house.balances();
+console.log(`House now: ${final.sol} SOL, ${final.usdc} USDC`);
+process.exit(Object.values(results).every((r) => r.startsWith("PASS")) ? 0 : 1);

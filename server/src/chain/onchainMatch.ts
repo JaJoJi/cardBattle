@@ -2,18 +2,18 @@ import { createHash } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
 import { RULES } from "../engine/rules";
 import type { TurnReport } from "../engine/types";
-import { MatchSession } from "../session";
+import { MatchSession, type SessionSnapshot } from "../session";
 import type { ArenaHouse, Leaf } from "./house";
 import type { ChainPhase, ChainStatus, ChainTx } from "./types";
 export type { ChainPhase, ChainStatus, ChainTx } from "./types";
 
 export type HouseLike = Pick<
   ArenaHouse,
-  "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "claim" | "cancel"
+  "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "claim" | "cancel" | "currentRound"
 >;
 
 export const ENTRY_TIMEOUT_MS = 10 * 60_000;
-const POLL_MS = 3_000;
+const POLL_MS = 5_000; // gentle on public RPC rate limits
 const PROTOCOL_FEE_BPS = 100;
 
 const digest = (x: unknown) => createHash("sha256").update(JSON.stringify(x)).digest("hex");
@@ -32,6 +32,15 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseMs = chainTi
     }
   }
   throw last;
+}
+
+/** What gets written to disk so a staked match survives a server restart. */
+export interface OnChainSnapshot {
+  version: 1;
+  savedAt: number;
+  player: string;
+  status: ChainStatus;
+  session: SessionSnapshot;
 }
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 300);
@@ -61,8 +70,18 @@ export class OnChainMatch {
     private readonly onUpdate: (m: OnChainMatch) => void,
     onSessionChange: (s: MatchSession) => void,
     timeoutMs: number = RULES.planningTimeoutMs,
+    restore?: OnChainSnapshot,
   ) {
-    this.session = new MatchSession(onSessionChange, timeoutMs, { onTurnResolved: (r) => this.onTurnResolved(r) }, { start: false });
+    this.session = new MatchSession(
+      onSessionChange,
+      timeoutMs,
+      { onTurnResolved: (r) => this.onTurnResolved(r) },
+      restore ? { restore: restore.session } : { start: false },
+    );
+    if (restore) {
+      this.status = structuredClone(restore.status);
+      return;
+    }
     this.status = {
       cluster: "devnet",
       phase: "creating",
@@ -78,6 +97,58 @@ export class OnChainMatch {
 
   get arenaId() {
     return this.status.arenaId;
+  }
+
+  get terminal(): boolean {
+    return ["settled", "cancelled", "failed"].includes(this.status.phase);
+  }
+
+  snapshot(): OnChainSnapshot {
+    return { version: 1, savedAt: Date.now(), player: this.player.toBase58(), status: structuredClone(this.status), session: this.session.snapshot() };
+  }
+
+  /** Rebuilds a match from disk (the session is replayed deterministically). Call `resume()` next. */
+  static restore(
+    house: HouseLike,
+    snap: OnChainSnapshot,
+    onUpdate: (m: OnChainMatch) => void,
+    onSessionChange: (s: MatchSession) => void,
+    timeoutMs: number = RULES.planningTimeoutMs,
+  ): OnChainMatch {
+    return new OnChainMatch(house, new PublicKey(snap.player), snap.status.stakeMicro, onUpdate, onSessionChange, timeoutMs, snap);
+  }
+
+  /**
+   * Continues a restored match from wherever the server stopped. Every chain write is
+   * idempotent, so re-running a step that already landed is a no-op.
+   */
+  async resume(): Promise<void> {
+    const phase = this.status.phase;
+    if (phase === "creating") {
+      // The create tx may or may not have landed; no stake can be in it yet (nobody had the arena id).
+      this.status.error = "The server restarted while creating the arena. No funds were staked — start a new match.";
+      this.setPhase("cancelled");
+    } else if (phase === "awaiting-entry" || phase === "starting") {
+      this.status.phase = "awaiting-entry";
+      this.entering = false;
+      this.pollTimer = setInterval(() => void this.checkEntry(), POLL_MS);
+      this.onUpdate(this);
+      await this.checkEntry();
+    } else if (phase === "playing" || phase === "finalizing") {
+      const arenaId = this.status.arenaId!;
+      let posted = 0;
+      try {
+        posted = await this.house.currentRound(arenaId);
+      } catch {
+        posted = 0; // commitRound re-checks each round anyway
+      }
+      if (posted < 1) this.enqueueRound(1, this.seedLeaves(), { player: RULES.startingHp, house: RULES.startingHp });
+      const reports = this.session.reports();
+      for (const r of reports) if (r.turn + 1 > posted) this.enqueueTurn(r);
+      if (this.session.finished) this.enqueueFinalize();
+      this.onUpdate(this);
+    }
+    // settled / cancelled / failed: nothing to do; kept so the player can still see it and claim/refund.
   }
 
   /** Creates the arena; afterwards the player signs `enter_arena` in their wallet. */
@@ -136,16 +207,7 @@ export class OnChainMatch {
       this.fail(`Arena could not start: ${errMsg(e)}. If the server stays down, the arena can be abandoned after 30 minutes and both stakes refunded.`);
       return;
     }
-    this.enqueueRound(1, [
-      {
-        kind: "seed-commitment",
-        matchId: this.session.matchId,
-        commitment: this.session.seedCommitment,
-        rules: this.session.versions.rules,
-        deck: this.session.versions.deck,
-        ai: this.session.versions.ai,
-      },
-    ]);
+    this.enqueueRound(1, this.seedLeaves(), { player: this.session.hp.HUMAN, house: this.session.hp.AI });
     this.setPhase("playing");
     this.session.start();
   }
@@ -164,21 +226,41 @@ export class OnChainMatch {
 
   // ------------------------------------------------------------------ internals
 
+  private seedLeaves(): Leaf[] {
+    return [
+      {
+        kind: "seed-commitment",
+        matchId: this.session.matchId,
+        commitment: this.session.seedCommitment,
+        rules: this.session.versions.rules,
+        deck: this.session.versions.deck,
+        ai: this.session.versions.ai,
+      },
+    ];
+  }
+
   private onTurnResolved(report: TurnReport): void {
-    // Leaves hash the full report (incl. private discard/draw identities) — only the root goes on-chain.
-    this.enqueueRound(report.turn + 1, [
-      { kind: "turn", matchId: this.session.matchId, turn: report.turn, digest: digest(report) },
-      { kind: "hp", side: "HUMAN", hp: report.hpAfter.HUMAN },
-      { kind: "hp", side: "AI", hp: report.hpAfter.AI },
-    ]);
+    this.enqueueTurn(report);
     if (this.session.finished) this.enqueueFinalize();
   }
 
-  private enqueueRound(round: number, leaves: Leaf[]): void {
+  /** Leaves hash the full report (incl. private discard/draw identities) — only the root goes on-chain. */
+  private enqueueTurn(report: TurnReport): void {
+    this.enqueueRound(
+      report.turn + 1,
+      [
+        { kind: "turn", matchId: this.session.matchId, turn: report.turn, digest: digest(report) },
+        { kind: "hp", side: "HUMAN", hp: report.hpAfter.HUMAN },
+        { kind: "hp", side: "AI", hp: report.hpAfter.AI },
+      ],
+      { player: report.hpAfter.HUMAN, house: report.hpAfter.AI },
+    );
+  }
+
+  private enqueueRound(round: number, leaves: Leaf[], hp: { player: number; house: number }): void {
     const arenaId = this.status.arenaId!;
-    const hp = this.session.hp;
     this.enqueue(round === 1 ? "Commit shuffle seed (round 1)" : `Commit turn ${round - 1} log`, () =>
-      this.house.commitRound(arenaId, round, this.player, leaves, { player: hp.HUMAN, house: hp.AI }),
+      this.house.commitRound(arenaId, round, this.player, leaves, hp),
     );
   }
 

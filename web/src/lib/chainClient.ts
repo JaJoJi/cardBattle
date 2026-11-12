@@ -46,8 +46,16 @@ export async function enterArena(rpcUrl: string, wallet: BrowserWallet, arenaId:
   if (!(await sdk.hasProfile(wallet.publicKey))) {
     sigs.push(await sdk.registerProfile(`Player ${wallet.publicKey.toBase58().slice(0, 4)}`));
   }
-  sigs.push(await sdk.enterArena(arenaId));
-  return sigs;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      sigs.push(await sdk.enterArena(arenaId));
+      return sigs;
+    } catch (e) {
+      // A just-created arena may not be visible on the RPC yet.
+      if (attempt >= 5 || !/not found/i.test(e instanceof Error ? e.message : String(e))) throw e;
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+  }
 }
 
 export async function claimPrize(rpcUrl: string, wallet: BrowserWallet, arenaId: number): Promise<string> {

@@ -1,11 +1,13 @@
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { PROGRAM_ID } from "@ritarena/sdk";
 import { WebSocketServer, WebSocket } from "ws";
+import { ChallengeStore, RateLimiter } from "./chain/auth";
 import { loadChainConfig } from "./chain/config";
+import { MatchStore } from "./chain/store";
 import { ArenaHouse, USDC } from "./chain/house";
 import { OnChainMatch } from "./chain/onchainMatch";
 import { CARD_CATALOG } from "./engine/cards";
@@ -17,6 +19,20 @@ const WEB_DIST = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../we
 const SESSION_IDLE_MS = 30 * 60_000;
 /** Allowed on-chain stakes (USDC). Must match the tiers shown in the web client. */
 const STAKE_TIERS_USDC = [1, 5, 25, 100];
+
+// Abuse limits for staked matches (each one costs the house SOL for account rent).
+const LIMITS = {
+  matchesPerIpPerHour: 6,
+  matchesPerWalletPerHour: 6,
+  maxOpenArenas: 20, // creating / awaiting-entry / starting, across all players
+  minHouseSol: 0.05,
+  wsMaxPayloadBytes: 16 * 1024,
+  wsMessagesPer10s: 40,
+  challengesPerConnPerMin: 10,
+  terminalSnapshotRetentionMs: 7 * 24 * 3600_000,
+};
+/** Only trust X-Forwarded-For when explicitly running behind a proxy. */
+const TRUST_PROXY = process.env.TRUST_PROXY === "1";
 
 const MIME: Record<string, string> = {
   ".html": "text/html",
@@ -43,6 +59,14 @@ const serverConfig: ServerConfig = {
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
+}
+
+let houseSolCache: { at: number; sol: number } | null = null;
+async function houseSol(): Promise<number> {
+  if (houseSolCache && Date.now() - houseSolCache.at < 15_000) return houseSolCache.sol;
+  const sol = (await house!.balances()).sol;
+  houseSolCache = { at: Date.now(), sol };
+  return sol;
 }
 
 let vaultCache: { at: number; body: unknown } | null = null;
@@ -99,6 +123,24 @@ const games = new Map<string, Game>();
 const sockets = new Map<Game, Set<WebSocket>>();
 const gameOfSession = new Map<MatchSession, Game>();
 
+const challenges = new ChallengeStore();
+const ipLimiter = new RateLimiter(LIMITS.matchesPerIpPerHour, 3600_000);
+const walletLimiter = new RateLimiter(LIMITS.matchesPerWalletPerHour, 3600_000);
+const store = house ? new MatchStore() : null;
+
+function persist(g: Game) {
+  if (!store || !g.chain) return;
+  try {
+    store.save(g.chain.snapshot());
+  } catch (e) {
+    console.error(`[store] failed to save ${g.token}: ${(e as Error).message}`);
+  }
+}
+
+const PRE_PLAY = ["creating", "awaiting-entry", "starting"];
+const openStakedMatchFor = (wallet: string) =>
+  [...games.values()].find((g) => g.chain && !g.chain.terminal && g.chain.player.toBase58() === wallet);
+
 function send(ws: WebSocket, msg: ServerMessage) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
@@ -124,22 +166,37 @@ function attach(ws: WebSocket, game: Game) {
 
 function closeGame(g: Game) {
   g.chain ? g.chain.dispose() : g.session.dispose();
+  if (g.chain?.terminal) store?.remove(g.token);
   games.delete(g.token);
   sockets.delete(g);
   gameOfSession.delete(g.session);
 }
 
-function createGame(msg: Extract<ClientMessage, { type: "new-match" }>): Game | string {
-  const onSessionChange = (s: MatchSession) => {
-    const g = gameOfSession.get(s);
-    if (g) pushState(g);
-  };
+const onSessionChange = (s: MatchSession) => {
+  const g = gameOfSession.get(s);
+  if (!g) return;
+  pushState(g);
+  persist(g); // a resolved turn is recorded before anything else can happen
+};
+
+function registerGame(g: Game) {
+  games.set(g.token, g);
+  gameOfSession.set(g.session, g);
+}
+
+function chainGame(match: OnChainMatch, holder: { game?: Game }): Game {
+  holder.game = { token: match.session.token, mode: "chain", session: match.session, chain: match };
+  return holder.game;
+}
+
+async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip: string): Promise<Game | string> {
   if (msg.mode !== "chain") {
     const session = new MatchSession(onSessionChange);
     return { token: session.token, mode: "mock", session };
   }
   if (!house) return `On-chain mode is unavailable: ${chain.reason ?? "not configured"}`;
-  if (!STAKE_TIERS_USDC.includes((msg.stakeMicro ?? 0) / USDC)) return "Invalid stake tier";
+  const stakeMicro = Number(msg.stakeMicro);
+  if (!STAKE_TIERS_USDC.includes(stakeMicro / USDC)) return "Invalid stake tier";
   let player: PublicKey;
   try {
     player = new PublicKey(String(msg.player));
@@ -147,24 +204,73 @@ function createGame(msg: Extract<ClientMessage, { type: "new-match" }>): Game | 
     return "Connect a wallet first";
   }
   if (player.equals(house.publicKey)) return "The house wallet cannot play against itself";
+  // Proof of wallet ownership (one-time, bound to wallet + stake).
+  const auth = challenges.redeem(msg.nonce, player.toBase58(), stakeMicro, msg.signature);
+  if (!auth.ok) return auth.reason;
+  const open = openStakedMatchFor(player.toBase58());
+  if (open) return `This wallet already has an open staked match (arena #${open.chain!.arenaId ?? "…"}). Finish or cancel it first.`;
+  if ([...games.values()].filter((g) => g.chain && PRE_PLAY.includes(g.chain.status.phase)).length >= LIMITS.maxOpenArenas) {
+    return "Too many matches are waiting to start right now — try again in a few minutes.";
+  }
+  if (!ipLimiter.allow(ip) || !walletLimiter.allow(player.toBase58())) return "Too many staked matches started recently — try again later.";
+  try {
+    if ((await houseSol()) < LIMITS.minHouseSol) return "The house wallet is low on SOL for fees — staked matches are paused.";
+  } catch {
+    return "Could not reach Solana devnet — try again shortly.";
+  }
   const holder: { game?: Game } = {};
-  const match = new OnChainMatch(house, player, msg.stakeMicro!, () => holder.game && pushChain(holder.game), onSessionChange);
-  holder.game = { token: match.session.token, mode: "chain", session: match.session, chain: match };
+  const match = new OnChainMatch(house, player, stakeMicro, () => holder.game && (pushChain(holder.game), persist(holder.game)), onSessionChange);
+  const game = chainGame(match, holder);
   void match.begin();
-  return holder.game;
+  return game;
 }
 
-const wss = new WebSocketServer({ server: http, path: "/ws" });
+/** Brings staked matches back after a restart; play resumes from the last recorded turn. */
+async function restoreMatches() {
+  if (!house || !store) return;
+  for (const { snap, file } of store.loadAll()) {
+    const terminal = ["settled", "cancelled", "failed"].includes(snap.status.phase);
+    if (terminal && Date.now() - snap.savedAt > LIMITS.terminalSnapshotRetentionMs) {
+      store.remove(snap.session.token);
+      continue;
+    }
+    try {
+      const holder: { game?: Game } = {};
+      const match = OnChainMatch.restore(house, snap, () => holder.game && (pushChain(holder.game), persist(holder.game)), onSessionChange);
+      registerGame(chainGame(match, holder));
+      console.log(`[restore] arena #${snap.status.arenaId ?? "-"} (${snap.status.phase}, turn ${match.session.humanView().view.turn}) for ${snap.player}`);
+      void match.resume();
+    } catch (e) {
+      console.error(`[restore] could not restore ${file}: ${(e as Error).message}`);
+    }
+  }
+}
 
-wss.on("connection", (ws) => {
+function clientIp(req: IncomingMessage): string {
+  const fwd = req.headers["x-forwarded-for"];
+  if (TRUST_PROXY && typeof fwd === "string") return fwd.split(",")[0].trim();
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+const wss = new WebSocketServer({ server: http, path: "/ws", maxPayload: LIMITS.wsMaxPayloadBytes });
+
+wss.on("connection", (ws, req) => {
   let game: Game | null = null;
+  const ip = clientIp(req);
+  const flood = new RateLimiter(LIMITS.wsMessagesPer10s, 10_000);
+  const challengeLimit = new RateLimiter(LIMITS.challengesPerConnPerMin, 60_000);
+  let creating = false;
   send(ws, { type: "welcome", catalog: Object.values(CARD_CATALOG), config: serverConfig });
 
   const detach = () => {
     if (game) sockets.get(game)?.delete(ws);
   };
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
+    if (!flood.allow("x")) {
+      send(ws, { type: "error", message: "Slow down" });
+      return ws.close(1008, "rate limit");
+    }
     let msg: ClientMessage;
     try {
       msg = JSON.parse(String(raw));
@@ -178,15 +284,31 @@ wss.on("connection", (ws) => {
       detach();
       game = found;
       attach(ws, game);
+    } else if (msg.type === "chain-challenge") {
+      if (!house) return send(ws, { type: "error", message: "On-chain mode is unavailable" });
+      if (!challengeLimit.allow("x")) return send(ws, { type: "error", message: "Too many sign-in requests" });
+      try {
+        const c = challenges.issue(String(msg.player), Number(msg.stakeMicro));
+        send(ws, { type: "chain-challenge", nonce: c.nonce, message: c.message });
+      } catch {
+        send(ws, { type: "error", message: "Invalid wallet address" });
+      }
     } else if (msg.type === "new-match") {
-      const created = createGame(msg);
+      if (creating) return send(ws, { type: "error", message: "A match is already being created" });
+      creating = true;
+      let created: Game | string;
+      try {
+        created = await createGame(msg, ip);
+      } finally {
+        creating = false;
+      }
       if (typeof created === "string") return send(ws, { type: "error", message: created });
       detach();
       // Abandon a previous unfinished *mock* match; staked matches keep running so they settle.
       if (game && !game.chain) closeGame(game);
       game = created;
-      games.set(game.token, game);
-      gameOfSession.set(game.session, game);
+      registerGame(game);
+      persist(game);
       attach(ws, game);
     } else if (msg.type === "commit") {
       if (!game) return send(ws, { type: "error", message: "No active match" });
@@ -215,6 +337,13 @@ setInterval(() => {
     if (!connected && !chainBusy && now - g.session.lastActivity > SESSION_IDLE_MS) closeGame(g);
   }
 }, 60_000).unref();
+
+// A stray rejection from an RPC client (e.g. a 429 inside a subscription) must not take
+// down the server and every live match with it.
+process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason instanceof Error ? reason.message : reason));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err.message));
+
+void restoreMatches();
 
 http.listen(PORT, () => {
   console.log(`RitArena Card Battle server on http://localhost:${PORT} (ws: /ws)`);

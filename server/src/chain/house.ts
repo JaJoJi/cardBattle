@@ -69,7 +69,30 @@ export class ArenaHouse {
   }
 
   /** 1v1, winner-takes-all arena with the stake as entry fee. The house becomes the oracle. */
+  /**
+   * Public RPC nodes can lag behind a confirmed write. Polls until `read` sees the change,
+   * so later steps (and the player's wallet) never act on stale state.
+   */
+  async waitUntil(read: () => Promise<boolean>, what: string, timeoutMs = 30_000): Promise<void> {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        if (await read()) return;
+      } catch {
+        /* transient RPC error — keep polling */
+      }
+      if (Date.now() > end) throw new Error(`Timed out waiting for ${what} to be visible on the RPC`);
+      await new Promise((r) => setTimeout(r, 1_500));
+    }
+  }
+
   async createMatchArena(stakeMicro: number): Promise<{ arenaId: number; tx: string }> {
+    const created = await this.createArenaTx(stakeMicro);
+    await this.waitUntil(async () => (await this.sdk.getArena(created.arenaId)) !== null, `arena #${created.arenaId}`);
+    return created;
+  }
+
+  private async createArenaTx(stakeMicro: number): Promise<{ arenaId: number; tx: string }> {
     return this.sdk.createArena({
       ...BATTLE_ROYALE_TEMPLATE,
       entryFee: stakeMicro,
@@ -85,6 +108,12 @@ export class ArenaHouse {
       actionSchema: "cardbattle-v1: 0-2 card uids per turn, simultaneous commit",
       rulesHash: rulesHash(),
     });
+  }
+
+  async currentRound(arenaId: number): Promise<number> {
+    const arena = await this.sdk.getArena(arenaId);
+    if (!arena) throw new Error(`Arena ${arenaId} not found`);
+    return arena.currentRound;
   }
 
   async hasEntered(arenaId: number, owner: PublicKey): Promise<boolean> {

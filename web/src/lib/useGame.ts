@@ -25,6 +25,7 @@ export type Connection = "connecting" | "open" | "closed";
 
 export function useGame() {
   const wsRef = useRef<WebSocket | null>(null);
+  const challengeWaiter = useRef<((c: { nonce: string; message: string } | null) => void) | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
   const [view, setView] = useState<PlayerView | null>(null);
   const [deadline, setDeadline] = useState<number | null>(null);
@@ -75,6 +76,10 @@ export function useGame() {
           case "chain":
             setChain(msg.status);
             break;
+          case "chain-challenge":
+            challengeWaiter.current?.({ nonce: msg.nonce, message: msg.message });
+            challengeWaiter.current = null;
+            break;
           case "no-session":
             writeToken(null);
             setView(null);
@@ -88,6 +93,8 @@ export function useGame() {
             setReady(true);
             break;
           case "error":
+            challengeWaiter.current?.(null);
+            challengeWaiter.current = null;
             setError(msg.message);
             setErrorSeq((n) => n + 1);
             break;
@@ -121,7 +128,21 @@ export function useGame() {
     deadline,
     error,
     clearError: () => setError(null),
-    newMatch: (opts: { mode: PlayMode; stakeMicro?: number; player?: string } = { mode: "mock" }) => send({ type: "new-match", ...opts }),
+    newMatch: (opts: { mode: PlayMode; stakeMicro?: number; player?: string; nonce?: string; signature?: string } = { mode: "mock" }) =>
+      send({ type: "new-match", ...opts }),
+    /** Asks the server for a one-time message to sign (proves wallet ownership for this stake). */
+    requestChallenge: (player: string, stakeMicro: number) =>
+      new Promise<{ nonce: string; message: string } | null>((resolve) => {
+        challengeWaiter.current?.(null);
+        challengeWaiter.current = resolve;
+        send({ type: "chain-challenge", player, stakeMicro });
+        setTimeout(() => {
+          if (challengeWaiter.current === resolve) {
+            challengeWaiter.current = null;
+            resolve(null);
+          }
+        }, 10_000);
+      }),
     chainEntered: () => send({ type: "chain-entered" }),
     chainCancel: () => send({ type: "chain-cancel" }),
     commit: (turn: number, cards: string[]) => send({ type: "commit", turn, cards }),

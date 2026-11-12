@@ -430,3 +430,5 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
   .staking { grid-template-columns: 1fr; }
   .side-col { position: static; max-height: none; }
 }
+
+.toast--info { background: #1d2a24; border-color: var(--ok); top: 62px; cursor: default; }

@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import type { PlayMode } from "../../server/src/protocol";
 import { ModeToggle, StakingScreen } from "./components/ChainParts";
 import { STAKE_TIERS, type StakeTier } from "./data/mockVault";
-import { USDC } from "./lib/chainClient";
+import bs58 from "bs58";
+import { USDC, friendlyError } from "./lib/chainClient";
 import { useGame } from "./lib/useGame";
 import { useWallet } from "./lib/wallet";
 import { MatchPage } from "./pages/MatchPage";
@@ -75,10 +76,28 @@ export function App() {
     begin(() => game.newMatch({ mode: "mock" }));
   };
 
-  const startChain = (stakeUsdc: number) => {
-    if (!wallet.address) return void wallet.connect();
-    setTier(STAKE_TIERS.find((t) => t.stake === stakeUsdc) ?? null);
-    begin(() => game.newMatch({ mode: "chain", stakeMicro: stakeUsdc * USDC, player: wallet.address! }));
+  const [signing, setSigning] = useState(false);
+  const [signError, setSignError] = useState<string | null>(null);
+
+  /** Proves wallet ownership (signMessage — no transaction, no fee), then asks the server for an arena. */
+  const startChain = async (stakeUsdc: number) => {
+    if (!wallet.wallet || !wallet.address) return void wallet.connect();
+    const stakeMicro = stakeUsdc * USDC;
+    setSignError(null);
+    setSigning(true);
+    try {
+      const challenge = await game.requestChallenge(wallet.address, stakeMicro);
+      if (!challenge) return; // server error already shown
+      const signature = await wallet.wallet.signMessage(new TextEncoder().encode(challenge.message));
+      setTier(STAKE_TIERS.find((t) => t.stake === stakeUsdc) ?? null);
+      begin(() =>
+        game.newMatch({ mode: "chain", stakeMicro, player: wallet.address!, nonce: challenge.nonce, signature: bs58.encode(signature) }),
+      );
+    } catch (e) {
+      setSignError(friendlyError(e));
+    } finally {
+      setSigning(false);
+    }
   };
 
   const isChainGame = game.mode === "chain" && !!game.chain;
@@ -99,11 +118,12 @@ export function App() {
         </div>
       </header>
 
-      {game.error && (
-        <div className="toast" role="alert" onClick={game.clearError}>
-          {game.error}
+      {(game.error || signError) && (
+        <div className="toast" role="alert" onClick={() => (game.clearError(), setSignError(null))}>
+          {game.error ?? signError}
         </div>
       )}
+      {signing && <div className="toast toast--info">Approve the sign-in message in your wallet (no fee)…</div>}
 
       {!game.ready ? (
         <main className="center muted">Connecting to the arena…</main>
@@ -115,7 +135,7 @@ export function App() {
           activeMatch={game.view}
           activeIsChain={isChainGame}
           onEnter={startMock}
-          onEnterChain={startChain}
+          onEnterChain={(s) => void startChain(s)}
           onResume={() => setPage("match")}
         />
       ) : showMatch && preGame && game.config ? (
@@ -136,7 +156,7 @@ export function App() {
           config={game.config}
           wallet={wallet}
           onCommit={game.commit}
-          onNewMatch={() => (isChainGame && tier ? startChain(tier.stake) : startMock(tier))}
+          onNewMatch={() => (isChainGame && tier ? void startChain(tier.stake) : startMock(tier))}
           onBack={() => setPage("vault")}
         />
       ) : (

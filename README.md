@@ -32,6 +32,7 @@ Each staked match is a **1v1 RitArena arena** on the already-deployed program
 
 | Step | Who signs | Instruction |
 | --- | --- | --- |
+| 0. Prove wallet ownership: sign a one-time message bound to wallet + stake (no tx, no fee) | **player wallet** | off-chain `signMessage` |
 | 1. Create arena: entry fee = stake, max 2 agents, prize split `[100]`, creator fee 0, `rules_hash` = sha256 of rules + deck | house (server) | `create_arena` |
 | 2. Player stakes (registers a profile first if needed) | **player wallet (Phantom)** | `register_profile`, `enter_arena` |
 | 3. House matches the stake, starts | house | `enter_arena`, `start_arena` |
@@ -49,6 +50,31 @@ Every house write is idempotent (it checks on-chain state first), so retries aft
 confirmation timeout or a stale RPC read never double-send; finalize and the house claim are
 separate steps, and a failed claim never un-settles the match.
 
+### Abuse limits & restart recovery
+
+Creating an arena costs the house SOL (rent), so staked matches are gated:
+
+- **Wallet sign-in** — the server issues a single-use challenge (5-minute expiry) bound to the wallet and
+  stake; the match is only created if the ed25519 signature verifies (`server/src/chain/auth.ts`).
+- **One open staked match per wallet**, max **6 per IP and 6 per wallet per hour**, at most **20 arenas
+  waiting to start** at once, and new matches pause if the house has < 0.05 SOL.
+- WebSocket hardening: 16 KB max message, 40 messages / 10 s per connection, 10 sign-in challenges / min.
+  Set `TRUST_PROXY=1` only when running behind a reverse proxy that sets `X-Forwarded-For`.
+
+**Restarts don't lose staked matches.** Each one is saved to `server/data/matches/<token>.json`
+(gitignored, owner-only — it contains the secret seed) on every turn and chain update. Because the engine,
+AI and RNG are deterministic for a given seed, a snapshot is just the seed plus the player's moves; on start
+the server replays it to the exact same state and resumes from the saved phase:
+
+| Saved phase | On restart |
+| --- | --- |
+| creating | cancelled (no one could have staked yet) |
+| awaiting-entry / starting | resumes watching for the stake; enter/start are idempotent |
+| playing / finalizing | replays the match, posts only rounds missing on-chain, finalizes + claims if over |
+| settled / cancelled / failed | kept 7 days for display, then deleted |
+
+Players reconnect to the same match automatically (their session token survives the restart).
+
 **Verifiable shuffle:** the secret seed's commitment is posted before turn 1 and the seed is
 revealed when the match ends (shown in the match's chain panel). `sha256(seed ‖ matchId)` must
 equal the commitment, and `createMatchRngs(matchId, versions, seed)` reproduces both decks.
@@ -60,7 +86,7 @@ cd server
 npm run chain:keygen        # creates a devnet house wallet in server/.env (gitignored)
 # fund the printed address with devnet SOL at https://faucet.solana.com (≈1 SOL)
 npm run chain:setup         # registers the house profile, mints 1,000 test USDC
-npm run chain:smoke         # optional: full devnet match with a throwaway player
+npm run chain:smoke         # devnet checks: house-wins, player-wins (+claim), cancel, refund, restart
 npm run chain:claim -- <id> # recover a house win whose claim step failed (safe to re-run)
 cd .. && npm run build && npm start
 ```
@@ -227,7 +253,7 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 - The house wallet is also the arena oracle (it reports the result of a match it is playing in). That's inherent to the
   current RitArena oracle model; an independent oracle or PER/TEE execution is the next step.
 - Randomness is server-local CSPRNG (committed before play in on-chain mode), not VRF.
-- On-chain matches live in server memory; if the server restarts mid-match, recovery is via abandon → refund after 30 min.
+- Staked matches are persisted to local disk (single server). Running several server instances would need a shared store.
 - Matches are in memory; a server restart loses them. No accounts, no wallet, no stakes.
 - The AI is a simple heuristic (`heuristic-v1`) with small private-RNG tie-breaking; it's not tuned.
 - Balance is untested: flat 5 energy means Meteor Impact is playable from turn 1.
@@ -239,6 +265,6 @@ field rejects stale/replayed submissions; the session token in `sessionStorage` 
 
 1. ~~Settlement via the RitArena program~~ — done for devnet (on-chain mode).
 2. **MagicBlock VRF + PER proof of concept** — verify per-identity private reads, private VRF consumption, and commit-back; commit to `hash(privateEntropy)` before requesting VRF to prevent grinding.
-3. Persist on-chain matches (resume after server restart), separate oracle from house wallet.
+3. ~~Persist on-chain matches~~ — done. Next: separate the oracle from the house wallet.
 4. Wallet-adapter support beyond Phantom; end-to-end browser tests.
 5. Legal review of human-vs-house real-money play before any mainnet stakes.

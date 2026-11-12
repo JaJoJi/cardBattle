@@ -9,6 +9,7 @@ interface PhantomProvider {
   disconnect(): Promise<void>;
   signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T>;
   signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]>;
+  signMessage(message: Uint8Array, display?: "utf8" | "hex"): Promise<{ signature: Uint8Array }>;
   on(event: "accountChanged" | "disconnect" | "connect", cb: (arg?: unknown) => void): void;
   off?(event: string, cb: (arg?: unknown) => void): void;
 }
@@ -24,6 +25,8 @@ export interface BrowserWallet {
   publicKey: PublicKey;
   signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T>;
   signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]>;
+  /** Off-chain message signature (no transaction, no fee). */
+  signMessage(message: Uint8Array): Promise<Uint8Array>;
 }
 
 export function useWallet() {
@@ -70,6 +73,7 @@ export function useWallet() {
           publicKey: new PublicKey(address),
           signTransaction: (tx) => provider.signTransaction(tx),
           signAllTransactions: (txs) => provider.signAllTransactions(txs),
+          signMessage: async (msg) => (await provider.signMessage(msg, "utf8")).signature,
         }
       : null;
 

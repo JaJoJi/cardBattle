@@ -39,7 +39,16 @@ class FakeHouse implements HouseLike {
     this.calls.push("start");
     return "sig-start";
   }
+  posted = 0;
+  async currentRound() {
+    return this.posted;
+  }
   async commitRound(_id: number, round: number, _p: PublicKey, leaves: Record<string, string | number>[], hp: { player: number; house: number }) {
+    if (round <= this.posted) {
+      this.calls.push(`round:${round}:skip`);
+      return null;
+    }
+    this.posted = round;
     this.calls.push(`round:${round}`);
     this.rounds.push({ round, leaves, hp });
     return `sig-round-${round}`;

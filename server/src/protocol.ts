@@ -15,8 +15,13 @@ export interface ServerConfig {
 
 export type ClientMessage =
   | { type: "resume"; token: string }
-  /** mock = free practice match; chain = staked RitArena devnet match for `player`. */
-  | { type: "new-match"; mode?: PlayMode; stakeMicro?: number; player?: string }
+  /** Ask for a one-time message to sign, proving ownership of `player` for this stake. */
+  | { type: "chain-challenge"; player: string; stakeMicro: number }
+  /**
+   * mock = free practice match; chain = staked RitArena devnet match for `player`,
+   * which needs `nonce` + `signature` (base58 ed25519 over the challenge message).
+   */
+  | { type: "new-match"; mode?: PlayMode; stakeMicro?: number; player?: string; nonce?: string; signature?: string }
   /** `turn` binds the submission to a turn so stale/replayed messages are rejected. */
   | { type: "commit"; turn: number; cards: string[] }
   /** Player signed enter_arena in their wallet — server re-checks the chain now. */
@@ -28,5 +33,6 @@ export type ServerMessage =
   | { type: "session"; token: string; mode: PlayMode }
   | { type: "state"; view: PlayerView; deadline: number | null }
   | { type: "chain"; status: ChainStatus }
+  | { type: "chain-challenge"; nonce: string; message: string }
   | { type: "no-session" }
   | { type: "error"; message: string };
