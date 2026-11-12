@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
-import { ENTRY_TIMEOUT_MS, OnChainMatch, type HouseLike } from "../src/chain/onchainMatch";
+import { ENTRY_TIMEOUT_MS, OnChainMatch, chainTiming, type HouseLike } from "../src/chain/onchainMatch";
+
+chainTiming.retryBaseMs = 1;
 import { merkleRootOf, rulesHash } from "../src/chain/house";
 import { canonicalDeck, DECK_VERSION } from "../src/engine/cards";
 import { RULES } from "../src/engine/rules";
@@ -42,10 +44,38 @@ class FakeHouse implements HouseLike {
     this.rounds.push({ round, leaves, hp });
     return `sig-round-${round}`;
   }
+  // Simulated chain state so idempotency can be exercised.
+  finished = false;
+  claimed = false;
+  /** Number of claim attempts that see stale "not Finished" RPC state (the devnet bug). */
+  staleClaimReads = 0;
+  /** The finalize tx lands, but the client sees a confirmation timeout once. */
+  finalizeTimeoutOnce = false;
+
   async finalize(_id: number, _p: PublicKey, winner: "PLAYER" | "HOUSE") {
+    if (this.finished) {
+      this.calls.push("finalize:skip");
+      return null;
+    }
     this.calls.push(`finalize:${winner}`);
     this.winner = winner;
-    return { finalizeTx: "sig-final", claimTx: winner === "HOUSE" ? "sig-claim" : undefined };
+    this.finished = true;
+    if (this.finalizeTimeoutOnce) {
+      this.finalizeTimeoutOnce = false;
+      throw new Error("Transaction was not confirmed in 30.00 seconds");
+    }
+    return "sig-final";
+  }
+  async claim() {
+    if (this.staleClaimReads > 0) {
+      this.staleClaimReads--;
+      this.calls.push("claim:stale");
+      throw new Error("Arena 1 is Eliminating, not Finished");
+    }
+    if (this.claimed) return null;
+    this.calls.push("claim");
+    this.claimed = true;
+    return "sig-claim";
   }
   async cancel() {
     this.calls.push("cancel");
@@ -110,7 +140,7 @@ describe("OnChainMatch lifecycle", () => {
     const turns = m.session.humanView().view.lastTurn!.turn;
     const rounds = house.calls.filter((c) => c.startsWith("round:")).map((c) => Number(c.split(":")[1]));
     expect(rounds).toEqual(Array.from({ length: turns + 1 }, (_, i) => i + 1));
-    expect(house.calls.at(-1)).toMatch(/^finalize:/);
+    expect(house.calls.slice(-2)).toEqual(["finalize:HOUSE", "claim"]);
     expect(m.status.phase).toBe("settled");
     // Passing every turn never wins.
     expect(m.status.winner).toBe("HOUSE");
@@ -188,6 +218,49 @@ describe("OnChainMatch lifecycle", () => {
     expect(m.status.payoutMicro).toBe(9_900_000);
     m.dispose();
   });
+});
+
+describe("settlement retries (devnet RPC lag)", () => {
+  async function playToEnd(house: FakeHouse) {
+    const { m } = newMatch(house);
+    await m.begin();
+    house.playerEntered = true;
+    await m.checkEntry();
+    let guard = 0;
+    while (!m.session.finished && guard++ < 100) m.session.commitHuman(m.session.humanView().view.turn, []);
+    for (let i = 0; i < 400 && m.status.phase !== "settled" && m.status.phase !== "failed"; i++) await new Promise((r) => setTimeout(r, 25));
+    return m;
+  }
+
+  it("a stale 'not Finished' read during the house claim no longer re-sends finalize; it retries only the claim", async () => {
+    const house = new FakeHouse();
+    house.staleClaimReads = 1;
+    const m = await playToEnd(house);
+    expect(m.status.phase).toBe("settled");
+    expect(house.calls.filter((c) => c.startsWith("finalize"))).toEqual(["finalize:HOUSE"]);
+    expect(house.calls.filter((c) => c.startsWith("claim"))).toEqual(["claim:stale", "claim"]);
+    expect(m.status.error).toBeUndefined();
+    m.dispose();
+  }, 20_000);
+
+  it("finalize that landed but timed out is detected on retry and not sent twice", async () => {
+    const house = new FakeHouse();
+    house.finalizeTimeoutOnce = true;
+    const m = await playToEnd(house);
+    expect(m.status.phase).toBe("settled");
+    expect(house.calls.filter((c) => c.startsWith("finalize"))).toEqual(["finalize:HOUSE", "finalize:skip"]);
+    expect(house.claimed).toBe(true);
+    m.dispose();
+  }, 20_000);
+
+  it("if the house claim keeps failing, the match is still settled and tells you how to recover", async () => {
+    const house = new FakeHouse();
+    house.staleClaimReads = 99;
+    const m = await playToEnd(house);
+    expect(m.status.phase).toBe("settled");
+    expect(m.status.error).toMatch(/chain:claim -- 42/);
+    m.dispose();
+  }, 30_000);
 });
 
 describe("chain helpers", () => {

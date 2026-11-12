@@ -9,7 +9,7 @@ export type { ChainPhase, ChainStatus, ChainTx } from "./types";
 
 export type HouseLike = Pick<
   ArenaHouse,
-  "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "cancel"
+  "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "claim" | "cancel"
 >;
 
 export const ENTRY_TIMEOUT_MS = 10 * 60_000;
@@ -18,7 +18,10 @@ const PROTOCOL_FEE_BPS = 100;
 
 const digest = (x: unknown) => createHash("sha256").update(JSON.stringify(x)).digest("hex");
 
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseMs = 1_500): Promise<T> {
+/** Retry backoff for chain writes (tests shrink it). */
+export const chainTiming = { retryBaseMs: 1_500 };
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseMs = chainTiming.retryBaseMs): Promise<T> {
   let last: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -121,14 +124,14 @@ export class OnChainMatch {
     this.stopPolling();
     this.setPhase("starting");
     try {
-      await this.track("House enters (stakes)", async () => ({ sig: await withRetry(() => this.house.enter(arenaId)) }));
+      await this.track("House enters (stakes)", async () => ({ sig: (await withRetry(() => this.house.enter(arenaId))) ?? undefined }));
     } catch (e) {
       // Player's stake is in escrow; cancel so they can refund it.
       await this.cancel(`House could not enter: ${errMsg(e)}`, true);
       return;
     }
     try {
-      await this.track("Start arena", async () => ({ sig: await withRetry(() => this.house.start(arenaId)) }));
+      await this.track("Start arena", async () => ({ sig: (await withRetry(() => this.house.start(arenaId))) ?? undefined }));
     } catch (e) {
       this.fail(`Arena could not start: ${errMsg(e)}. If the server stays down, the arena can be abandoned after 30 minutes and both stakes refunded.`);
       return;
@@ -191,23 +194,30 @@ export class OnChainMatch {
     ];
     this.queue = this.queue.then(async () => {
       try {
-        const r = await this.track(`Finalize — ${winner === "PLAYER" ? "player" : "house"} wins`, async () => {
-          const res = await withRetry(() => this.house.finalize(arenaId, this.player, winner, leaves));
-          return { sig: res.finalizeTx, value: res };
-        });
-        if (r.claimTx) this.pushTx({ label: "House claims pot", status: "ok", sig: r.claimTx });
-        this.status.playerMustClaim = winner === "PLAYER";
-        this.setPhase("settled");
+        await this.track(`Finalize — ${winner === "PLAYER" ? "player" : "house"} wins`, async () => ({
+          sig: (await withRetry(() => this.house.finalize(arenaId, this.player, winner, leaves))) ?? undefined,
+        }));
       } catch (e) {
         this.fail(`Finalize failed: ${errMsg(e)}. The server will need to retry; if it can't, the arena can be abandoned after 30 minutes for refunds.`);
+        return;
       }
+      // The result is final once finalize lands; collecting the house's pot is a separate step.
+      this.status.playerMustClaim = winner === "PLAYER";
+      if (winner === "HOUSE") {
+        try {
+          await this.track("House claims pot", async () => ({ sig: (await withRetry(() => this.house.claim(arenaId), 4)) ?? undefined }));
+        } catch (e) {
+          this.status.error = `Result is final, but the house's claim failed (${errMsg(e)}). Recover with \`npm run chain:claim -- ${arenaId}\`.`;
+        }
+      }
+      this.setPhase("settled");
     });
   }
 
-  private enqueue(label: string, fn: () => Promise<string>): void {
+  private enqueue(label: string, fn: () => Promise<string | null>): void {
     this.queue = this.queue.then(async () => {
       try {
-        await this.track(label, async () => ({ sig: await withRetry(fn) }));
+        await this.track(label, async () => ({ sig: (await withRetry(fn)) ?? undefined }));
       } catch {
         // Recorded as a failed tx; gameplay continues and later rounds still post.
       }

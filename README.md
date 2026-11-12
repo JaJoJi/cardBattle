@@ -45,6 +45,9 @@ server cancels the arena (`cancel_arena`) and the player gets a **Refund** butto
 (`refund_entry`). Players have a 10-minute entry window. If the server dies mid-match, the
 arena can be abandoned after 30 minutes of oracle inactivity and both stakes refunded.
 Gameplay never waits on the chain — turn commits are queued and sent in order.
+Every house write is idempotent (it checks on-chain state first), so retries after a devnet
+confirmation timeout or a stale RPC read never double-send; finalize and the house claim are
+separate steps, and a failed claim never un-settles the match.
 
 **Verifiable shuffle:** the secret seed's commitment is posted before turn 1 and the seed is
 revealed when the match ends (shown in the match's chain panel). `sha256(seed ‖ matchId)` must
@@ -58,6 +61,7 @@ npm run chain:keygen        # creates a devnet house wallet in server/.env (giti
 # fund the printed address with devnet SOL at https://faucet.solana.com (≈1 SOL)
 npm run chain:setup         # registers the house profile, mints 1,000 test USDC
 npm run chain:smoke         # optional: full devnet match with a throwaway player
+npm run chain:claim -- <id> # recover a house win whose claim step failed (safe to re-run)
 cd .. && npm run build && npm start
 ```
 

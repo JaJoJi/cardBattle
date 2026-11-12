@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "chain:keygen": "tsx scripts/keygen.ts",
     "chain:setup": "tsx scripts/setup-house.ts",
-    "chain:smoke": "tsx scripts/smoke-devnet.ts"
+    "chain:smoke": "tsx scripts/smoke-devnet.ts",
+    "chain:claim": "tsx scripts/claim.ts"
   },
   "dependencies": {
     "@ritarena/sdk": "^0.5.5",

@@ -91,16 +91,25 @@ export class ArenaHouse {
     return (await this.sdk.getAgentDetails(arenaId, owner)) !== null;
   }
 
-  async enter(arenaId: number): Promise<string> {
+  // Every write below is idempotent: it first checks whether its effect is already on-chain
+  // and returns null instead of sending. A retry after a tx that landed but whose
+  // confirmation timed out (common on devnet) therefore never double-sends.
+
+  async enter(arenaId: number): Promise<string | null> {
+    if (await this.hasEntered(arenaId, this.publicKey)) return null;
     return this.sdk.enterArena(arenaId);
   }
 
-  async start(arenaId: number): Promise<string> {
+  async start(arenaId: number): Promise<string | null> {
+    const arena = await this.sdk.getArena(arenaId);
+    if (arena && !("registration" in arena.state)) return null;
     return this.sdk.startArena(arenaId);
   }
 
   /** Posts a Merkle root of this round's log + both sides' HP as scores. No eliminations. */
-  async commitRound(arenaId: number, round: number, player: PublicKey, leaves: Leaf[], hp: { player: number; house: number }): Promise<string> {
+  async commitRound(arenaId: number, round: number, player: PublicKey, leaves: Leaf[], hp: { player: number; house: number }): Promise<string | null> {
+    const arena = await this.sdk.getArena(arenaId);
+    if (arena && arena.currentRound >= round) return null;
     const playerEntry = entryPda(arenaId, player);
     const houseEntry = entryPda(arenaId, this.publicKey);
     return this.sdk.submitElimination(arenaId, {
@@ -115,17 +124,37 @@ export class ArenaHouse {
     });
   }
 
-  /** Finalizes with a single rank-1 winner. If the house won, it claims the pot immediately. */
-  async finalize(arenaId: number, player: PublicKey, winner: "PLAYER" | "HOUSE", leaves: Leaf[]): Promise<{ finalizeTx: string; claimTx?: string }> {
+  /** Finalizes with a single rank-1 winner. Returns null if the arena is already finished. */
+  async finalize(arenaId: number, player: PublicKey, winner: "PLAYER" | "HOUSE", leaves: Leaf[]): Promise<string | null> {
+    const arena = await this.sdk.getArena(arenaId);
+    if (arena && "finished" in arena.state) return null;
     const playerEntry = entryPda(arenaId, player);
     const houseEntry = entryPda(arenaId, this.publicKey);
-    const finalizeTx = await this.sdk.finalizeArena(arenaId, {
+    return this.sdk.finalizeArena(arenaId, {
       merkleRoot: merkleRootOf(leaves),
       winners: [{ entry: winner === "PLAYER" ? playerEntry : houseEntry, rank: 1 }],
       entryAccounts: [playerEntry, houseEntry],
     });
-    if (winner === "HOUSE") return { finalizeTx, claimTx: await this.sdk.claimPrize(arenaId) };
-    return { finalizeTx };
+  }
+
+  /**
+   * Claims the house's prize. The SDK re-reads the arena before claiming, and right after
+   * finalize the RPC may still report the old state — so wait until it reads Finished.
+   * Returns null if already claimed.
+   */
+  async claim(arenaId: number, waitMs = 30_000): Promise<string | null> {
+    const until = Date.now() + waitMs;
+    for (;;) {
+      const arena = await this.sdk.getArena(arenaId);
+      if (arena && "finished" in arena.state) break;
+      if (Date.now() > until) throw new Error(`Arena ${arenaId} still not Finished on the RPC after ${waitMs / 1000}s`);
+      await new Promise((r) => setTimeout(r, 1_500));
+    }
+    const entry = await this.sdk.getAgentDetails(arenaId, this.publicKey);
+    if (!entry) throw new Error("House has no entry in this arena");
+    if (entry.prizeRank === 0) throw new Error("House is not a winner of this arena");
+    if (entry.prizeClaimed) return null;
+    return this.sdk.claimPrize(arenaId);
   }
 
   /**
