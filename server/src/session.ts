@@ -184,6 +184,9 @@ export class MatchSession {
     if (this.started) return;
     this.started = true;
     this.beginPlanning();
+    // Push the live view: an on-chain match may have been re-dealt (VRF seed) since the
+    // client last saw it, and its placeholder hand must never stay on screen.
+    if (!this.replaying) this.onChange(this);
   }
 
   humanView(): { view: PlayerView; deadline: number | null } {

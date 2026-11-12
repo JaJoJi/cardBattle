@@ -146,6 +146,27 @@ describe("MagicBlock VRF seed (vrf-v2)", () => {
     m.dispose();
   });
 
+  it("after the VRF re-deal, the player is sent the real hand (not the placeholder) and can play it", async () => {
+    const vrf = new FakeVrf();
+    const chain = new Chain();
+    const player = Keypair.generate().publicKey;
+    const pushed: string[][] = [];
+    const m = new OnChainMatch(chain, player, 1_000_000, () => {}, (s) => pushed.push(s.humanView().view.self.hand.map((c) => c.uid)), 60_000, undefined, vrf);
+    await m.begin();
+    const placeholder = m.session.humanView().view.self.hand.map((c) => c.uid);
+    chain.entered.add(player.toBase58());
+    await m.checkEntry();
+    const real = m.session.humanView().view.self.hand.map((c) => c.uid);
+    expect(real).not.toEqual(placeholder);
+    // The client was told about the re-dealt hand when the match went live.
+    expect(pushed.at(-1)).toEqual(real);
+    // Playing a card from that hand is accepted.
+    const view = m.session.humanView().view;
+    const card = view.self.hand.find((c) => c.def.cost <= view.self.energy)!;
+    expect(m.session.commitHuman(view.turn, [card.uid])).toEqual({ ok: true });
+    m.dispose();
+  });
+
   it("the VRF request happens before start_arena (so failure can still cancel)", async () => {
     const vrf = new FakeVrf();
     const chain = new Chain();

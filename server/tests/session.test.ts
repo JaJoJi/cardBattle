@@ -27,7 +27,7 @@ describe("MatchSession", () => {
     vi.advanceTimersByTime(1001);
     expect(s.humanView().view.turn).toBe(2);
     expect(s.humanView().view.lastTurn!.played.HUMAN).toEqual([]);
-    expect(changes).toEqual([2]);
+    expect(changes).toEqual([1, 2]); // live view pushed at start, then after the timed-out turn
     s.dispose();
   });
 
