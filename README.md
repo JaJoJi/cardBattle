@@ -4,9 +4,11 @@ Turn-based **human vs AI** card battle for [RitArena](https://github.com/BonChai
 Both sides secretly pick up to two cards, then reveal together. An authoritative game server
 and web client, with two play modes you can toggle in the top bar:
 
-- **Practice** — free matches against the house AI with a mock vault (no wallet, no chain).
-- **On-chain (devnet)** — staked matches settled through the deployed **RitArena program on
-  Solana devnet** using `@ritarena/sdk`, with test USDC. See [On-chain mode](#on-chain-mode-solana-devnet).
+- **Practice** — free matches against the house bot (`search-v3`). No wallet, no chain, no API cost.
+- **On-chain (devnet)** — challenge one of **five LLM champions** (via OpenRouter) for test USDC,
+  settled through the deployed **RitArena program on Solana devnet** using `@ritarena/sdk`.
+  Every challenge feeds a public **Card Battle benchmark**. See [LLM arena](#llm-arena-ai-champions)
+  and [On-chain mode](#on-chain-mode-solana-devnet).
 
 Staked matches are shuffled with **MagicBlock VRF** (see [Randomness](#randomness-magicblock-vrf)).
 MagicBlock Private Ephemeral Rollups (private hands) are not integrated yet (see [Roadmap](#roadmap)).
@@ -26,6 +28,62 @@ npm run build && npm start   # production build served by the server → http://
 npm test             # engine, privacy and session tests (vitest)
 ```
 
+## LLM arena (AI champions)
+
+There are no stake tiers. A player picks a champion and pays its **current price**:
+
+| Champion | OpenRouter id | Notes |
+| --- | --- | --- |
+| DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash-1017` | |
+| Hy4 | `tencent/hy4` | reasoning off (with it on, it spent its whole token cap thinking and returned nothing) |
+| GLM 5.3 Flash | `z-ai/glm-5.3-flash` | |
+| GPT-6 Luna | `openai/gpt-6-luna` | |
+| Claude Opus 5.5 | `anthropic/claude-opus-5.5` | ~20–60× the API cost of the others; output capped at 800 tokens |
+
+These are the top five vendors in OpenRouter's weekly ranking (2026-11-13). Edit them in `server/src/ai/llm/models.ts`.
+
+**How a model plays** (`server/src/ai/llm/`): each turn it gets the rules, the card list and its own
+`PlayerView` only, which is the same hidden-information projection the bot gets. It sees its own hand, public
+counts and the last 6 public turns. No player-written text ever reaches the prompt. It replies with structured JSON
+`{cards, reason}`, and the server validates that reply against hand, energy and card count. An illegal reply gets one retry with the
+error; after that, or on a timeout (22 s per call), the model **passes**. The bot never fills in, so the benchmark measures the
+model alone. The human's timer runs while the model thinks. Each turn's choice, reason and cost is saved with the match, so a
+restart replays from the record and never asks the model again. **Reasons are only shown after the match ends**, because they
+can hint at the model's hand.
+
+**Pricing and bounty** (`server/src/arena/`):
+
+```
+price = (1 USDC + 3 × avg real API cost per match) × skill      rounded up to 0.10
+skill = clamp(1 + 2·(winRate − ½), 0.75, 3)                     winRate smoothed with 20 pseudo-games at 50%
+prize = max(2 × price, 70% of the champion's free bounty)       locked in the quote (5 min)
+```
+
+The money uses the existing equal-stake 1v1 arena, with no contract change. The player stakes the price, and the house stakes the same
+amount from the champion's bounty. If the player wins, they claim the pot (2 × price − 1%) and the house sends `prize − pot` as a
+separate USDC transfer. That transfer is sent **once and never auto-retried**, because a timed-out confirmation may still have landed.
+If the house wins (draws included), it claims the pot. The player's half, minus the real API cost and a 10% platform cut, goes into that
+champion's bounty. Stronger champions lose less often, so their bounties and prizes grow, which is what makes their higher price worth paying.
+The house keeps each bounty at a 5 USDC floor (tracked as subsidy), and each accepted quote reserves its worst-case payout so
+concurrent wins stay covered. The book lives in `server/data/arena-book.json`.
+
+**API budget.** The server's OpenRouter key (`OPENROUTER_API_KEY`) has an $8 limit enforced by OpenRouter. On top of that, the
+server checks a persistent ledger (`server/data/llm-spend.json`) before every call: `LLM_BUDGET_USD` (default 8) total and
+`LLM_DAILY_USD` (default 1.5) per UTC day. Devnet USDC is free but API credit is real, so there is also a limit of 10 challenges per
+wallet per day, and a champion rests whenever the budget can't cover 3 of its matches.
+
+**Seed benchmark** (spends real credit, capped per run):
+
+```bash
+cd server
+npm run llm:arena -- --models all --matches 1 --max-usd 0.5            # LLM vs search-v3 bot
+npm run llm:arena -- --models z-ai/glm-5.3-flash --matches 10 --opponent heuristic-v2
+```
+
+Results go to `server/data/llm-benchmark.json`, and their costs seed price estimates until humans have played. They never count toward win rates.
+
+`GET /api/arena` returns the leaderboard (record, win rate, cost, price, prize, bounty) and the budget.
+
 ## On-chain mode (Solana devnet)
 
 Each staked match is a **1v1 RitArena arena** on the already-deployed program
@@ -33,14 +91,14 @@ Each staked match is a **1v1 RitArena arena** on the already-deployed program
 
 | Step | Who signs | Instruction |
 | --- | --- | --- |
-| 0. Prove wallet ownership: sign a one-time message bound to wallet + stake (no tx, no fee) | **player wallet** | off-chain `signMessage` |
+| 0. Pick a champion → price quote; prove wallet ownership by signing a one-time message bound to wallet + price + champion (no tx, no fee) | **player wallet** | off-chain `signMessage` |
 | 1. Create arena: entry fee = stake, max 2 agents, prize split `[100]`, creator fee 0, `rules_hash` = sha256 of rules + deck | house (server) | `create_arena` |
 | 2. Player stakes (registers a profile first if needed) | **player wallet (Phantom)** | `register_profile`, `enter_arena` |
-| 3. House matches the stake, starts | house | `enter_arena`, `start_arena` |
+| 3. House matches the stake (from the champion's bounty), starts | house | `enter_arena`, `start_arena` |
 | 4. Round 1: Merkle root committing to `sha256(seed ‖ matchId)` | house | `submit_elimination` |
 | 5. One round per turn: Merkle root of the turn log, both HPs as scores | house | `submit_elimination` |
 | 6. Finalize rank-1 winner (draw ⇒ house); house auto-claims if it won | house | `finalize_arena`, `claim_prize` |
-| 7. Player claims if they won (2 × stake − 1% protocol fee) | **player wallet** | `claim_prize` |
+| 7. Player claims if they won (2 × stake − 1% protocol fee); house sends the bounty top-up | **player wallet** / house | `claim_prize`, SPL transfer |
 
 Safety ordering: the player stakes first and the house last, so if the house can't enter, the
 server cancels the arena (`cancel_arena`) and the player gets a **Refund** button
@@ -124,7 +182,7 @@ Without a house key the server runs Practice mode only and the toggle is disable
 
 ## Screens
 
-- **Vault (home)** — house-vault stats, stake tiers (Bronze 1 / Silver 5 / Gold 25 / Mythic 100 USDC, 1.9× win payout),
+- **Vault (home)** — free practice vs the house bot, the five LLM champions (price, prize, bounty, record), the benchmark leaderboard,
   payout rules and recent settlements. **All vault numbers are mock data** from `web/src/data/mockVault.ts`; no funds move.
   Shows a "Continue match" banner if a match is in progress.
 - **Match board** — felt table with the AI seat (HP orb, card backs, deck), arena lanes (AI lock seal vs your chosen
@@ -246,7 +304,7 @@ server/                    Node + TypeScript, authoritative
   src/index.ts             HTTP (serves web/dist) + WebSocket /ws
   tests/                   engine, privacy/randomness, session tests
 web/                       React + Vite client (renders projections, submits actions)
-  src/pages/VaultPage.tsx  home: mock vault stats, stake tiers, settlements
+  src/pages/VaultPage.tsx  home: practice card, champions, leaderboard (src/pages/Champions.tsx)
   src/pages/MatchPage.tsx  game board, hand, reveal overlay, game over
   src/components/          GameCard, Hud (HP orb, energy, portraits), BattleLog, RevealOverlay
   src/data/mockVault.ts    MOCK vault data (Practice mode)

@@ -1,15 +1,13 @@
 import { useEffect, useState } from "react";
 import type { PlayMode } from "../../server/src/protocol";
 import { ModeToggle, StakingScreen } from "./components/ChainParts";
-import { STAKE_TIERS, type StakeTier } from "./data/mockVault";
 import bs58 from "bs58";
-import { USDC, friendlyError } from "./lib/chainClient";
+import { friendlyError } from "./lib/chainClient";
 import { useGame } from "./lib/useGame";
 import { useWallet } from "./lib/wallet";
 import { MatchPage } from "./pages/MatchPage";
 import { VaultPage } from "./pages/VaultPage";
 
-const TIER_KEY = "ritarena-cardbattle-tier";
 const MODE_KEY = "ritarena-cardbattle-mode";
 
 function load<T>(key: string, parse: (v: string | null) => T): T {
@@ -32,7 +30,8 @@ export function App() {
   const wallet = useWallet();
   const [page, setPage] = useState<"vault" | "match">("vault");
   const [mode, setMode] = useState<PlayMode>(() => load(MODE_KEY, (v) => (v === "chain" ? "chain" : "mock")));
-  const [tier, setTier] = useState<StakeTier | null>(() => load(TIER_KEY, (v) => STAKE_TIERS.find((t) => t.id === v) ?? null));
+  /** The champion of the last challenge, for "rematch". */
+  const [lastModel, setLastModel] = useState<string | null>(null);
   // While a new match is requested, ignore the previous match's view.
   const [waitingFrom, setWaitingFrom] = useState<string | null | undefined>(undefined);
 
@@ -68,30 +67,30 @@ export function App() {
     start();
   };
 
-  const startMock = (t: StakeTier | null) => {
-    if (t) {
-      setTier(t);
-      save(TIER_KEY, t.id);
-    }
-    begin(() => game.newMatch({ mode: "mock" }));
-  };
+  const startMock = () => begin(() => game.newMatch({ mode: "mock" }));
 
   const [signing, setSigning] = useState(false);
   const [signError, setSignError] = useState<string | null>(null);
 
-  /** Proves wallet ownership (signMessage — no transaction, no fee), then asks the server for an arena. */
-  const startChain = async (stakeUsdc: number) => {
+  /** Gets a price quote, proves wallet ownership by signing it (no transaction, no fee), then asks for an arena. */
+  const startChain = async (model: string) => {
     if (!wallet.wallet || !wallet.address) return void wallet.connect();
-    const stakeMicro = stakeUsdc * USDC;
     setSignError(null);
     setSigning(true);
     try {
-      const challenge = await game.requestChallenge(wallet.address, stakeMicro);
+      const challenge = await game.requestChallenge(wallet.address, model);
       if (!challenge) return; // server error already shown
       const signature = await wallet.wallet.signMessage(new TextEncoder().encode(challenge.message));
-      setTier(STAKE_TIERS.find((t) => t.stake === stakeUsdc) ?? null);
+      setLastModel(model);
       begin(() =>
-        game.newMatch({ mode: "chain", stakeMicro, player: wallet.address!, nonce: challenge.nonce, signature: bs58.encode(signature) }),
+        game.newMatch({
+          mode: "chain",
+          model,
+          quoteId: challenge.quote.id,
+          player: wallet.address!,
+          nonce: challenge.nonce,
+          signature: bs58.encode(signature),
+        }),
       );
     } catch (e) {
       setSignError(friendlyError(e));
@@ -123,7 +122,7 @@ export function App() {
           {game.error ?? signError}
         </div>
       )}
-      {signing && <div className="toast toast--info">Approve the sign-in message in your wallet (no fee)…</div>}
+      {signing && <div className="toast toast--info">Approve the challenge message in your wallet (no fee)…</div>}
 
       {!game.ready ? (
         <main className="center muted">Connecting to the arena…</main>
@@ -135,7 +134,7 @@ export function App() {
           activeMatch={game.view}
           activeIsChain={isChainGame}
           onEnter={startMock}
-          onEnterChain={(s) => void startChain(s)}
+          onEnterChain={(m) => void startChain(m)}
           onResume={() => setPage("match")}
         />
       ) : showMatch && preGame && game.config ? (
@@ -151,12 +150,12 @@ export function App() {
         <MatchPage
           view={game.view!}
           deadline={game.deadline}
-          tier={tier}
+          opponent={game.opponent}
           chain={isChainGame ? game.chain : null}
           config={game.config}
           wallet={wallet}
           onCommit={game.commit}
-          onNewMatch={() => (isChainGame && tier ? void startChain(tier.stake) : startMock(tier))}
+          onNewMatch={() => (isChainGame && (game.chain?.opponent?.model ?? lastModel) ? void startChain(game.chain?.opponent?.model ?? lastModel!) : startMock())}
           onBack={() => setPage("vault")}
         />
       ) : (

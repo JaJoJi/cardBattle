@@ -277,16 +277,25 @@ export function StakingScreen({
   const steps: { label: string; state: "done" | "active" | "todo" }[] = [
     { label: status.arenaId !== null ? `Arena #${status.arenaId} created by the house` : "Creating 1v1 arena", state: status.arenaId !== null ? "done" : "active" },
     { label: `Stake ${usdc(stake)} test USDC from your wallet`, state: status.phase === "awaiting-entry" ? "active" : status.phase === "creating" ? "todo" : "done" },
-    { label: "House matches your stake and starts the match", state: status.phase === "starting" ? "active" : status.phase === "playing" ? "done" : "todo" },
+    { label: "House matches your fee from the bounty and starts the match", state: status.phase === "starting" ? "active" : status.phase === "playing" ? "done" : "todo" },
   ];
 
   return (
     <main className="staking">
       <div className="staking__card">
         <span className="mock-badge mock-badge--chain">Solana devnet · test USDC</span>
-        <h1>Stake &amp; enter</h1>
+        <h1>{status.opponent ? `Challenge ${status.opponent.name}` : "Stake & enter"}</h1>
         <p className="muted">
-          Winner takes the pot: <strong>{usdc(status.payoutMicro / USDC)} USDC</strong> (2× stake − 1% protocol fee). Draws go to the house.
+          {status.prizeMicro ? (
+            <>
+              Beat it and win <strong>{usdc(status.prizeMicro / USDC)} USDC</strong>: the arena pot ({usdc(status.payoutMicro / USDC)}) plus{" "}
+              {usdc((status.topUpMicro ?? 0) / USDC)} from its bounty. Draws go to the house.
+            </>
+          ) : (
+            <>
+              Winner takes the pot: <strong>{usdc(status.payoutMicro / USDC)} USDC</strong> (2× stake − 1% protocol fee). Draws go to the house.
+            </>
+          )}
         </p>
         <ol className="steps">
           {steps.map((s) => (

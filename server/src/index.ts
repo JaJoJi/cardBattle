@@ -10,17 +10,18 @@ import { loadChainConfig } from "./chain/config";
 import { MatchStore } from "./chain/store";
 import { MatchVrf, loadVrfIdl } from "./chain/vrf";
 import { ProfileStore } from "./ai/profiles";
-import { ArenaHouse, USDC } from "./chain/house";
+import { ArenaHouse } from "./chain/house";
 import { OnChainMatch } from "./chain/onchainMatch";
 import { CARD_CATALOG } from "./engine/cards";
 import { MatchSession } from "./session";
-import type { ClientMessage, PlayMode, ServerConfig, ServerMessage } from "./protocol";
+import type { ClientMessage, OpponentInfo, PlayMode, ServerConfig, ServerMessage } from "./protocol";
+import { ArenaBook } from "./arena/book";
+import { llmClient } from "./ai/llm/llmAi";
+import { LLM_MODELS, llmVersionOf, modelById, modelByVersion } from "./ai/llm/models";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const WEB_DIST = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../web/dist");
 const SESSION_IDLE_MS = 30 * 60_000;
-/** Allowed on-chain stakes (USDC). Must match the tiers shown in the web client. */
-const STAKE_TIERS_USDC = [1, 5, 25, 100];
 
 // Abuse limits for staked matches (each one costs the house SOL for account rent).
 const LIMITS = {
@@ -32,6 +33,10 @@ const LIMITS = {
   wsMessagesPer10s: 40,
   challengesPerConnPerMin: 10,
   terminalSnapshotRetentionMs: 7 * 24 * 3600_000,
+  /** Every LLM challenge spends real API credit, even though devnet USDC is free. */
+  challengesPerWalletPerDay: 10,
+  /** A champion only accepts challenges while the API budget covers this many of its matches. */
+  budgetMatchesHeadroom: 3,
 };
 /** Only trust X-Forwarded-For when explicitly running behind a proxy. */
 const TRUST_PROXY = process.env.TRUST_PROXY === "1";
@@ -100,16 +105,56 @@ async function vaultSnapshot() {
     houseSol: balances.sol,
     houseUsdc: balances.usdc,
     liveMatches: [...games.values()].filter((g) => g.chain && ["awaiting-entry", "starting", "playing", "finalizing"].includes(g.chain.status.phase)).length,
-    stakeTiers: STAKE_TIERS_USDC,
     recentArenas: recent,
   };
   vaultCache = { at: Date.now(), body };
   return body;
 }
 
+// --- arena: LLM champions, bounties, prices ---
+const book = new ArenaBook();
+/** Seed cost estimates from the benchmark script until real human matches replace them. */
+(function seedCostsFromBenchmark() {
+  const file = join(fileURLToPath(new URL(".", import.meta.url)), "../data/llm-benchmark.json");
+  if (!existsSync(file)) return;
+  try {
+    const rows = JSON.parse(readFileSync(file, "utf8")) as { model: string; costUsd: number; opponent: string; seed: string; outcome: string }[];
+    const n = book.applyBenchmark(rows);
+    if (n) console.log(`[arena] folded ${n} seed-benchmark game(s) into Elo`);
+    for (const m of LLM_MODELS) {
+      if (book.raw(m.id).recentCostUsd.length) continue;
+      for (const r of rows.filter((x) => x.model === m.id)) book.addCostSample(m.id, r.costUsd);
+    }
+  } catch (e) {
+    console.error(`[arena] could not read benchmark: ${(e as Error).message}`);
+  }
+})();
+
+/** Why a champion can't take a challenge right now (null = available). */
+function unavailable(model: string): string | null {
+  const client = llmClient();
+  if (!client) return "No OpenRouter key configured";
+  const need = book.card(model).avgCostUsd * LIMITS.budgetMatchesHeadroom;
+  if (client.guard.remainingUsd < need) return "Resting — today's API budget is used up";
+  return null;
+}
+
+function arenaSnapshot() {
+  const guard = llmClient()?.guard;
+  return {
+    models: book.leaderboard().map((c) => ({ ...c, unavailable: unavailable(c.id) })),
+    budget: guard ? { spentUsd: guard.spentUsd, remainingUsd: guard.remainingUsd, capUsd: guard.capUsd, dailyCapUsd: guard.dailyCapUsd } : null,
+    chainEnabled: !!house,
+  };
+}
+
 // --- HTTP: API + static web client (production build) ---
 const http = createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url ?? "/").split("?")[0]);
+  if (urlPath === "/api/arena") {
+    json(res, 200, arenaSnapshot());
+    return;
+  }
   if (urlPath === "/api/vault") {
     vaultSnapshot()
       .then((b) => json(res, 200, b))
@@ -144,6 +189,7 @@ const gameOfSession = new Map<MatchSession, Game>();
 const challenges = new ChallengeStore();
 const ipLimiter = new RateLimiter(LIMITS.matchesPerIpPerHour, 3600_000);
 const walletLimiter = new RateLimiter(LIMITS.matchesPerWalletPerHour, 3600_000);
+const walletDailyLimiter = new RateLimiter(LIMITS.challengesPerWalletPerDay, 24 * 3600_000);
 const store = house ? new MatchStore() : null;
 /** Per-wallet play patterns (revealed plays only) the AI learns across staked matches. */
 const profiles = house ? new ProfileStore() : null;
@@ -176,10 +222,37 @@ function send(ws: WebSocket, msg: ServerMessage) {
 function broadcast(game: Game, msg: ServerMessage) {
   for (const ws of sockets.get(game) ?? []) send(ws, msg);
 }
-function pushState(game: Game) {
-  const { view, deadline } = game.session.humanView();
-  broadcast(game, { type: "state", view, deadline });
+function opponentInfo(s: MatchSession): OpponentInfo {
+  const m = modelByVersion(s.versions.ai);
+  if (!m) return { model: "bot", name: "House Bot", thinking: false };
+  return { model: m.id, name: m.name, thinking: s.aiThinking, thoughts: (s.revealedAiThoughts() as OpponentInfo["thoughts"]) ?? undefined };
 }
+function stateMsg(game: Game): ServerMessage {
+  const { view, deadline } = game.session.humanView();
+  return { type: "state", view, deadline, opponent: opponentInfo(game.session) };
+}
+function pushState(game: Game) {
+  broadcast(game, stateMsg(game));
+}
+
+/** Books a challenge's result (or releases its reservation) once its chain phase is final. */
+function bookkeep(g: Game) {
+  if (!g.chain?.status.opponent) return;
+  const phase = g.chain.status.phase;
+  const id = g.session.matchId;
+  if (phase === "cancelled") book.release(id);
+  else if (phase === "settled") {
+    const o = g.session.outcome.outcome;
+    book.settle(id, g.chain.status.winner ?? "HOUSE", o === "HUMAN" ? "PLAYER" : o === "AI" ? "MODEL" : "DRAW", g.session.aiCostUsd());
+  }
+  // "failed" keeps the reservation: funds may still be in escrow until recovered.
+}
+const onChainUpdate = (holder: { game?: Game }) => () => {
+  if (!holder.game) return;
+  pushChain(holder.game);
+  persist(holder.game);
+  bookkeep(holder.game);
+};
 function pushChain(game: Game) {
   if (game.chain) broadcast(game, { type: "chain", status: game.chain.status });
 }
@@ -189,8 +262,7 @@ function attach(ws: WebSocket, game: Game) {
   sockets.get(game)!.add(ws);
   send(ws, { type: "session", token: game.token, mode: game.mode });
   if (game.chain) send(ws, { type: "chain", status: game.chain.status });
-  const { view, deadline } = game.session.humanView();
-  send(ws, { type: "state", view, deadline });
+  send(ws, stateMsg(game));
 }
 
 function closeGame(g: Game) {
@@ -225,8 +297,10 @@ async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip
     return { token: session.token, mode: "mock", session };
   }
   if (!house) return `On-chain mode is unavailable: ${chain.reason ?? "not configured"}`;
-  const stakeMicro = Number(msg.stakeMicro);
-  if (!STAKE_TIERS_USDC.includes(stakeMicro / USDC)) return "Invalid stake tier";
+  const model = modelById(String(msg.model));
+  if (!model) return "Pick an AI champion to challenge";
+  const busy = unavailable(model.id);
+  if (busy) return `${model.name}: ${busy}`;
   let player: PublicKey;
   try {
     player = new PublicKey(String(msg.player));
@@ -234,8 +308,11 @@ async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip
     return "Connect a wallet first";
   }
   if (player.equals(house.publicKey)) return "The house wallet cannot play against itself";
-  // Proof of wallet ownership (one-time, bound to wallet + stake).
-  const auth = challenges.redeem(msg.nonce, player.toBase58(), stakeMicro, msg.signature);
+  const quote = book.getQuote(msg.quoteId, player.toBase58());
+  if (!quote || quote.model !== model.id) return "Price quote expired — pick the opponent again.";
+  const stakeMicro = quote.priceMicro;
+  // Proof of wallet ownership (one-time, bound to wallet + price + opponent).
+  const auth = challenges.redeem(msg.nonce, player.toBase58(), stakeMicro, msg.signature, model.name);
   if (!auth.ok) return auth.reason;
   const open = openStakedMatchFor(player.toBase58());
   if (open) return `This wallet already has an open staked match (arena #${open.chain!.arenaId ?? "…"}). Finish or cancel it first.`;
@@ -243,6 +320,7 @@ async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip
     return "Too many matches are waiting to start right now — try again in a few minutes.";
   }
   if (!ipLimiter.allow(ip) || !walletLimiter.allow(player.toBase58())) return "Too many staked matches started recently — try again later.";
+  if (!walletDailyLimiter.allow(player.toBase58())) return `Daily limit reached (${LIMITS.challengesPerWalletPerDay} AI challenges per wallet) — come back tomorrow.`;
   try {
     if ((await houseSol()) < LIMITS.minHouseSol) return "The house wallet is low on SOL for fees — staked matches are paused.";
   } catch {
@@ -253,13 +331,20 @@ async function createGame(msg: Extract<ClientMessage, { type: "new-match" }>, ip
     house,
     player,
     stakeMicro,
-    () => holder.game && (pushChain(holder.game), persist(holder.game)),
+    onChainUpdate(holder),
     onSessionChange,
     undefined,
     undefined,
     vrf ?? undefined,
     profiles?.prior(player.toBase58()),
+    { model: model.id, name: model.name, aiVersion: llmVersionOf(model), prizeMicro: quote.prizeMicro, topUpMicro: quote.topUpMicro },
   );
+  // Nothing has touched the chain yet, so a failed reservation just drops the match.
+  const accepted = book.accept(quote.id, player.toBase58(), match.session.matchId);
+  if (typeof accepted === "string") {
+    match.dispose();
+    return accepted;
+  }
   const game = chainGame(match, holder);
   void match.begin();
   return game;
@@ -279,7 +364,7 @@ async function restoreMatches() {
       const match = OnChainMatch.restore(
         house,
         snap,
-        () => holder.game && (pushChain(holder.game), persist(holder.game)),
+        onChainUpdate(holder),
         onSessionChange,
         undefined,
         vrf ?? undefined,
@@ -334,9 +419,15 @@ wss.on("connection", (ws, req) => {
     } else if (msg.type === "chain-challenge") {
       if (!house) return send(ws, { type: "error", message: "On-chain mode is unavailable" });
       if (!challengeLimit.allow("x")) return send(ws, { type: "error", message: "Too many sign-in requests" });
+      const model = modelById(String(msg.model));
+      if (!model) return send(ws, { type: "error", message: "Unknown AI champion" });
+      const busy = unavailable(model.id);
+      if (busy) return send(ws, { type: "error", message: `${model.name}: ${busy}` });
       try {
-        const c = challenges.issue(String(msg.player), Number(msg.stakeMicro));
-        send(ws, { type: "chain-challenge", nonce: c.nonce, message: c.message });
+        const player = new PublicKey(String(msg.player)).toBase58();
+        const q = book.quote(model.id, player);
+        const c = challenges.issue(player, q.priceMicro, model.name);
+        send(ws, { type: "chain-challenge", nonce: c.nonce, message: c.message, quote: q });
       } catch {
         send(ws, { type: "error", message: "Invalid wallet address" });
       }

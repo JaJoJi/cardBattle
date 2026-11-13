@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClientMessage, PlayMode, ServerConfig, ServerMessage } from "../../../server/src/protocol";
+import type { ClientMessage, OpponentInfo, PlayMode, QuoteView, ServerConfig, ServerMessage } from "../../../server/src/protocol";
 import type { ChainStatus } from "../../../server/src/chain/types";
 import type { CardDefinition, PlayerView } from "../../../server/src/engine/types";
 
@@ -25,10 +25,11 @@ export type Connection = "connecting" | "open" | "closed";
 
 export function useGame() {
   const wsRef = useRef<WebSocket | null>(null);
-  const challengeWaiter = useRef<((c: { nonce: string; message: string } | null) => void) | null>(null);
+  const challengeWaiter = useRef<((c: { nonce: string; message: string; quote: QuoteView } | null) => void) | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
   const [view, setView] = useState<PlayerView | null>(null);
   const [deadline, setDeadline] = useState<number | null>(null);
+  const [opponent, setOpponent] = useState<OpponentInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false); // welcome received and resume attempted
   const [catalog, setCatalog] = useState<CardDefinition[]>([]);
@@ -77,7 +78,7 @@ export function useGame() {
             setChain(msg.status);
             break;
           case "chain-challenge":
-            challengeWaiter.current?.({ nonce: msg.nonce, message: msg.message });
+            challengeWaiter.current?.({ nonce: msg.nonce, message: msg.message, quote: msg.quote });
             challengeWaiter.current = null;
             break;
           case "no-session":
@@ -90,6 +91,7 @@ export function useGame() {
           case "state":
             setView(msg.view);
             setDeadline(msg.deadline);
+            setOpponent(msg.opponent ?? null);
             setReady(true);
             break;
           case "error":
@@ -126,16 +128,17 @@ export function useGame() {
     errorSeq,
     view,
     deadline,
+    opponent,
     error,
     clearError: () => setError(null),
-    newMatch: (opts: { mode: PlayMode; stakeMicro?: number; player?: string; nonce?: string; signature?: string } = { mode: "mock" }) =>
+    newMatch: (opts: { mode: PlayMode; model?: string; quoteId?: string; player?: string; nonce?: string; signature?: string } = { mode: "mock" }) =>
       send({ type: "new-match", ...opts }),
-    /** Asks the server for a one-time message to sign (proves wallet ownership for this stake). */
-    requestChallenge: (player: string, stakeMicro: number) =>
-      new Promise<{ nonce: string; message: string } | null>((resolve) => {
+    /** Asks the server for a price quote on `model` plus a one-time message to sign for it. */
+    requestChallenge: (player: string, model: string) =>
+      new Promise<{ nonce: string; message: string; quote: QuoteView } | null>((resolve) => {
         challengeWaiter.current?.(null);
         challengeWaiter.current = resolve;
-        send({ type: "chain-challenge", player, stakeMicro });
+        send({ type: "chain-challenge", player, model });
         setTimeout(() => {
           if (challengeWaiter.current === resolve) {
             challengeWaiter.current = null;

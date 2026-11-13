@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
-import { getAssociatedTokenAddress } from "@solana/spl-token";
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddress } from "@solana/spl-token";
 import { BATTLE_ROYALE_TEMPLATE, RitArena, computeMerkleRoot, hashLeaf, pdas } from "@ritarena/sdk";
 import { CARD_CATALOG, DECK_COMPOSITION, DECK_VERSION } from "../engine/cards";
 import { RULES } from "../engine/rules";
@@ -216,6 +216,21 @@ export class ArenaHouse {
         usdcMint: arena.usdcMint,
       })
       .rpc();
+  }
+
+  /**
+   * Plain USDC transfer from the house (bounty top-up on a player win). NOT idempotent, so
+   * callers send it once and never auto-retry: a "failed" confirmation may still have landed.
+   */
+  async transferUsdc(to: PublicKey, micro: number): Promise<string> {
+    const mint = await this.usdcMint();
+    const from = await getAssociatedTokenAddress(mint, this.publicKey);
+    const dest = await getAssociatedTokenAddress(mint, to);
+    const tx = new Transaction().add(
+      createAssociatedTokenAccountIdempotentInstruction(this.publicKey, dest, to, mint),
+      createTransferCheckedInstruction(from, mint, dest, this.publicKey, micro, 6),
+    );
+    return sendAndConfirmTransaction(this.connection, tx, [this.keypair], { commitment: "confirmed" });
   }
 
   async recentArenas(limit = 8) {

@@ -65,6 +65,10 @@ function projectReport(r: TurnReport, viewer: Side, view: (uid: string) => CardV
     opponentDrewCount: r.drawn[opponentOf(viewer)].length,
     damage: r.damage.map((d) => ({ ...d, sourceCards: [...d.sourceCards] })),
     heals: r.heals.map((h) => ({ ...h })),
+    hpBefore: { ...r.hpBefore },
     hpAfter: { ...r.hpAfter },
+    // Statuses are public (both sides already see each other's statuses).
+    statusesApplied: { HUMAN: r.statusesApplied.HUMAN.map((s) => ({ ...s })), AI: r.statusesApplied.AI.map((s) => ({ ...s })) },
+    statusesAfter: { HUMAN: r.statusesAfter.HUMAN.map((s) => ({ ...s })), AI: r.statusesAfter.AI.map((s) => ({ ...s })) },
   };
 }

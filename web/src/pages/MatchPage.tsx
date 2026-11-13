@@ -5,15 +5,17 @@ import { CardBack, GameCard } from "../components/GameCard";
 import { DeckPile, EnergyCrystals, HpOrb, Portrait, StatusChips } from "../components/Hud";
 import { LockIcon } from "../components/icons";
 import { RevealOverlay } from "../components/RevealOverlay";
-import { usdc, type StakeTier } from "../data/mockVault";
+import { usdc } from "../data/mockVault";
 import type { ChainStatus } from "../../../server/src/chain/types";
-import type { ServerConfig } from "../../../server/src/protocol";
+import type { OpponentInfo, ServerConfig } from "../../../server/src/protocol";
 import { ChainPanel, ChainSettlement, type WalletState } from "../components/ChainParts";
+import { ModelLogo } from "./Champions";
+import { LLM_LOGOS } from "../assets";
 
 interface Props {
   view: PlayerView;
   deadline: number | null;
-  tier: StakeTier | null;
+  opponent: OpponentInfo | null;
   chain: ChainStatus | null;
   config: ServerConfig | null;
   wallet: WalletState;
@@ -32,7 +34,7 @@ function useCountdown(deadline: number | null) {
   return deadline ? Math.max(0, Math.ceil((deadline - now) / 1000)) : null;
 }
 
-export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommit, onNewMatch, onBack }: Props) {
+export function MatchPage({ view, deadline, opponent, chain, config, wallet, onCommit, onNewMatch, onBack }: Props) {
   const [selected, setSelected] = useState<string[]>([]);
   const [reports, setReports] = useState<TurnReportView[]>([]);
   const [reveal, setReveal] = useState<TurnReportView | null>(null);
@@ -73,6 +75,7 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
     view.self.lastDraw === "HAND_FULL" ? "Hand full (7) — draw skipped" : view.self.lastDraw === "DECK_EMPTY" ? "Deck empty — draw skipped" : null;
 
   const mid = (handCards.length - 1) / 2;
+  const oppName = opponent?.name ?? "Arena AI";
 
   return (
     <main className="match">
@@ -88,14 +91,13 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
         )}
         {chain ? (
           <span className="stake-pill stake-pill--chain" title="Staked on Solana devnet">
-            Arena #{chain.arenaId} · {usdc(chain.stakeMicro / 1_000_000, 0)} USDC staked
+            Arena #{chain.arenaId} · {usdc(chain.stakeMicro / 1_000_000)} USDC staked
+            {chain.prizeMicro ? ` · win ${usdc(chain.prizeMicro / 1_000_000)}` : ""}
           </span>
         ) : (
-          tier && (
-            <span className="stake-pill" title="Practice — no funds move">
-              Practice · {tier.name} {usdc(tier.stake, 0)} USDC
-            </span>
-          )
+          <span className="stake-pill" title="Practice — no funds move">
+            Practice · free
+          </span>
         )}
       </div>
 
@@ -103,9 +105,9 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
         <div className="board">
           {/* Opponent */}
           <section className="seat seat--ai">
-            <Portrait side="AI" />
+            {opponent && LLM_LOGOS[opponent.model] ? <ModelLogo src={LLM_LOGOS[opponent.model]} name={oppName} size={56} /> : <Portrait side="AI" />}
             <div className="seat__info">
-              <span className="seat__name">Arena AI</span>
+              <span className="seat__name">{oppName}</span>
               <StatusChips statuses={view.opponent.statuses} />
             </div>
             <HpOrb hp={view.opponent.hp} max={view.maxHp} />
@@ -123,10 +125,10 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
             <div className="lane lane--ai">
               {finished ? null : view.opponent.committed ? (
                 <div className="seal">
-                  <LockIcon /> AI locked in
+                  <LockIcon /> {oppName} locked in
                 </div>
               ) : (
-                <div className="seal seal--wait">AI is thinking…</div>
+                <div className="seal seal--wait">{oppName} is thinking…</div>
               )}
             </div>
             <div className="arena__divider">
@@ -148,7 +150,7 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
               )}
               {locked && laneCards.length > 0 && (
                 <span className="lane__tag">
-                  <LockIcon /> Hidden from AI until reveal
+                  <LockIcon /> Hidden from {oppName} until reveal
                 </span>
               )}
             </div>
@@ -210,15 +212,16 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
 
         <div className="side-col">
           {chain && <ChainPanel status={chain} />}
-          <BattleLog reports={reports} />
+          {opponent?.thoughts && <Thoughts name={oppName} thoughts={opponent.thoughts} />}
+          <BattleLog reports={reports} oppName={oppName} />
         </div>
       </div>
 
-      {reveal && <RevealOverlay report={reveal} onClose={() => setReveal(null)} />}
+      {reveal && <RevealOverlay report={reveal} oppName={oppName} onClose={() => setReveal(null)} />}
       {finished && !reveal && (
         <GameOver
           view={view}
-          tier={tier}
+          oppName={oppName}
           settlement={chain && config ? <ChainSettlement status={chain} w={wallet} config={config} /> : null}
           onNewMatch={onNewMatch}
           onBack={onBack}
@@ -228,15 +231,40 @@ export function MatchPage({ view, deadline, tier, chain, config, wallet, onCommi
   );
 }
 
+/** The LLM's own one-line reasons for each move — only sent once the match is over. */
+function Thoughts({ name, thoughts }: { name: string; thoughts: NonNullable<OpponentInfo["thoughts"]> }) {
+  const cost = thoughts.reduce((s, t) => s + (t?.costUsd ?? 0), 0);
+  return (
+    <section className="thoughts" aria-label={`${name}'s reasoning`}>
+      <h3 className="section-title">{name}'s reasoning</h3>
+      <ol>
+        {thoughts.map((t, i) =>
+          t ? (
+            <li key={i}>
+              <span className="thoughts__turn">T{t.turn}</span>
+              <span>
+                {t.reason || <em className="muted">{t.outcome === "ok" ? "(no reason given)" : `passed — ${t.outcome}`}</em>}
+              </span>
+            </li>
+          ) : null,
+        )}
+      </ol>
+      <p className="muted small">
+        {thoughts.length} decisions · API cost ${cost.toFixed(4)}
+      </p>
+    </section>
+  );
+}
+
 function GameOver({
   view,
-  tier,
+  oppName,
   settlement,
   onNewMatch,
   onBack,
 }: {
   view: PlayerView;
-  tier: StakeTier | null;
+  oppName: string;
   settlement: React.ReactNode;
   onNewMatch: () => void;
   onBack: () => void;
@@ -249,7 +277,7 @@ function GameOver({
     view.endReason === "TURN_LIMIT"
       ? ["Turn limit reached — higher HP wins."]
       : view.lossReasons
-        ? [...why("You", view.lossReasons.HUMAN), ...why("The AI", view.lossReasons.AI)]
+        ? [...why("You", view.lossReasons.HUMAN), ...why(oppName, view.lossReasons.AI)]
         : [];
   const reason = reasons.length ? reasons.join(" · ") + (view.outcome === "DRAW" ? ". Draws go to the house." : ".") : null;
   return (
@@ -257,15 +285,10 @@ function GameOver({
       <div className={`gameover ${win ? "is-win" : "is-loss"}`}>
         <h2 id="go-title">{title}</h2>
         <p>
-          You {Math.max(0, view.self.hp)} HP · AI {Math.max(0, view.opponent.hp)} HP
+          You {Math.max(0, view.self.hp)} HP · {oppName} {Math.max(0, view.opponent.hp)} HP
         </p>
         {reason && <p className="muted">{reason}</p>}
         {settlement}
-        {!settlement && tier && (
-          <p className="gameover__payout">
-            {win ? `Mock payout: ${usdc(tier.stake * tier.payoutMultiplier)} USDC` : `Mock stake of ${usdc(tier.stake)} USDC kept by the vault`}
-          </p>
-        )}
         <div className="gameover__actions">
           <button className="btn btn--ghost" onClick={onBack}>
             Back to vault

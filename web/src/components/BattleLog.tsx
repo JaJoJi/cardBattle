@@ -1,9 +1,9 @@
 import type { DamageRecord, Side, TurnReportView } from "../../../server/src/engine/types";
 import { GameCard } from "./GameCard";
+import { RoundSummary } from "./RoundSummary";
 
-const NAME: Record<Side, string> = { HUMAN: "You", AI: "AI" };
-
-export function damageLine(d: DamageRecord): string {
+export function damageLine(d: DamageRecord, oppName = "AI"): string {
+  const NAME: Record<Side, string> = { HUMAN: "You", AI: oppName };
   const who = `${NAME[d.sourcePlayer]} → ${NAME[d.target]}`;
   switch (d.category) {
     case "ATTACK":
@@ -19,7 +19,8 @@ export function damageLine(d: DamageRecord): string {
   }
 }
 
-export function ReportLines({ report }: { report: TurnReportView }) {
+export function ReportLines({ report, oppName = "AI" }: { report: TurnReportView; oppName?: string }) {
+  const NAME: Record<Side, string> = { HUMAN: "You", AI: oppName };
   return (
     <ul className="lines">
       {(["AI", "HUMAN"] as Side[]).map((s) =>
@@ -28,7 +29,7 @@ export function ReportLines({ report }: { report: TurnReportView }) {
         ) : null,
       )}
       {report.damage.map((d, i) => (
-        <li key={i} className={`line line--${d.category.toLowerCase()}`}>{damageLine(d)}</li>
+        <li key={i} className={`line line--${d.category.toLowerCase()}`}>{damageLine(d, oppName)}</li>
       ))}
       {report.heals.map((h, i) => (
         <li key={`h${i}`} className="line line--heal">
@@ -36,15 +37,15 @@ export function ReportLines({ report }: { report: TurnReportView }) {
         </li>
       ))}
       {report.youDrew.length > 0 && <li className="line line--draw">You drew {report.youDrew.map((c) => c.def.name).join(", ")}</li>}
-      {report.opponentDrewCount > 0 && <li className="line line--draw">AI drew {report.opponentDrewCount} card(s)</li>}
+      {report.opponentDrewCount > 0 && <li className="line line--draw">{oppName} drew {report.opponentDrewCount} card(s)</li>}
       {report.youLost.length > 0 && <li className="line line--discard">Disruption discarded your {report.youLost.map((c) => c.def.name).join(", ")}</li>}
-      {report.opponentLostCount > 0 && <li className="line line--discard">Your Disruption discarded {report.opponentLostCount} hidden AI card(s)</li>}
+      {report.opponentLostCount > 0 && <li className="line line--discard">Your Disruption discarded {report.opponentLostCount} hidden card(s) of {oppName}</li>}
       {report.damage.length === 0 && report.heals.length === 0 && <li className="line muted">No damage</li>}
     </ul>
   );
 }
 
-export function BattleLog({ reports }: { reports: TurnReportView[] }) {
+export function BattleLog({ reports, oppName = "AI" }: { reports: TurnReportView[]; oppName?: string }) {
   return (
     <aside className="log-panel" aria-label="Battle log">
       <h2 className="log-panel__title">Battle log</h2>
@@ -53,20 +54,18 @@ export function BattleLog({ reports }: { reports: TurnReportView[] }) {
         {[...reports].reverse().map((r) => (
           <li key={r.turn} className="log-entry">
             <div className="log-entry__head">
-              <span>Turn {r.turn}</span>
-              <span className="muted">
-                You {Math.max(0, r.hpAfter.HUMAN)} · AI {Math.max(0, r.hpAfter.AI)}
-              </span>
+              <span>Round {r.turn}</span>
             </div>
+            <RoundSummary report={r} oppName={oppName} compact />
             <div className="log-entry__cards">
-              <span className="who">AI</span>
+              <span className="who" title={oppName}>Foe</span>
               {r.played.AI.length ? r.played.AI.map((c) => <GameCard key={c.uid} def={c.def} size="sm" />) : <span className="muted small">pass</span>}
             </div>
             <div className="log-entry__cards">
               <span className="who">You</span>
               {r.played.HUMAN.length ? r.played.HUMAN.map((c) => <GameCard key={c.uid} def={c.def} size="sm" />) : <span className="muted small">pass</span>}
             </div>
-            <ReportLines report={r} />
+            <ReportLines report={r} oppName={oppName} />
           </li>
         ))}
       </ol>

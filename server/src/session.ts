@@ -41,6 +41,8 @@ export interface SessionSnapshot {
   humanCommits: string[][];
   /** The AI's selection each turn; replayed verbatim so restores never re-run the search. */
   aiCommits?: string[][];
+  /** LLM seats: the per-turn record (reason, cost, outcome) behind each aiCommits entry. */
+  aiMeta?: unknown[];
   /** Frozen pattern prior (this player's earlier matches) the AI started with. */
   aiPrior?: PatternStats;
   rulesVersion: string;
@@ -61,6 +63,10 @@ export class MatchSession {
   private readonly humanCommits: string[][] = [];
   private readonly aiCommits: string[][] = [];
   private replayAi: string[][] | null = null;
+  private readonly aiMeta: unknown[] = [];
+  /** An async (LLM) AI is still choosing this turn's cards. */
+  private thinking = false;
+  private disposed = false;
   private readonly ai: AiPlayer;
   private readonly aiPrior?: PatternStats;
   lastActivity = Date.now();
@@ -72,7 +78,7 @@ export class MatchSession {
     opts: { start?: boolean; restore?: SessionSnapshot; aiVersion?: string; aiPrior?: PatternStats } = {},
   ) {
     const r = opts.restore;
-    if (r && (r.rulesVersion !== RULES.version || r.deckVersion !== DECK_VERSION || !(AI_VERSIONS as readonly string[]).includes(r.aiVersion))) {
+    if (r && (r.rulesVersion !== RULES.version || r.deckVersion !== DECK_VERSION || !AI_VERSIONS.includes(r.aiVersion))) {
       throw new Error(`Cannot restore match ${r.matchId}: it was played with ${r.rulesVersion}/${r.deckVersion}/${r.aiVersion}`);
     }
     // A match keeps the AI version (and frozen prior) it started with, even across upgrades.
@@ -90,6 +96,7 @@ export class MatchSession {
       aiDeckRng: this.rngs.aiDeck,
     });
     if (r) {
+      this.aiMeta.push(...(r.aiMeta ?? []));
       if (r.started) this.replay(r.humanCommits, r.aiCommits ?? null);
     } else if (opts.start !== false) this.start();
   }
@@ -118,6 +125,7 @@ export class MatchSession {
       started: this.started,
       humanCommits: this.humanCommits.map((c) => [...c]),
       aiCommits: this.aiCommits.map((c) => [...c]),
+      aiMeta: this.aiMeta.length ? structuredClone(this.aiMeta) : undefined,
       aiPrior: this.aiPrior,
       rulesVersion: this.state.rulesVersion,
       deckVersion: this.state.deckVersion,
@@ -164,6 +172,21 @@ export class MatchSession {
   get outcome() {
     return { outcome: this.state.outcome, settlement: this.state.settlement };
   }
+  /** True while an LLM opponent is still deciding (the human may already have locked in). */
+  get aiThinking() {
+    return this.thinking;
+  }
+  /** Per-turn LLM records. Reasons can hint at the AI's hand, so they are only public once the match ends. */
+  aiTurnRecords(): unknown[] {
+    return structuredClone(this.aiMeta);
+  }
+  /** Real API spend of an LLM opponent so far (USD). */
+  aiCostUsd(): number {
+    return this.aiMeta.reduce<number>((s, m) => s + (Number((m as { costUsd?: number } | null)?.costUsd) || 0), 0);
+  }
+  revealedAiThoughts(): unknown[] | null {
+    return this.finished ? this.aiTurnRecords() : null;
+  }
   get hp() {
     return { HUMAN: this.state.players.HUMAN.hp, AI: this.state.players.AI.hp };
   }
@@ -204,6 +227,7 @@ export class MatchSession {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
@@ -214,26 +238,45 @@ export class MatchSession {
     // views (rebuilding its memory) but its recorded choice is used verbatim.
     const view = projectFor(this.state, "AI");
     const recorded = this.replayAi?.[this.aiCommits.length];
-    let aiChoice: string[];
     if (recorded) {
       this.ai.observe(view);
-      aiChoice = recorded;
+      this.commitAi(recorded);
+    } else if (this.ai.decideAsync) {
+      // LLM: the human's timer runs while the model thinks. The model still only sees its own
+      // projection (never the human's pending pick), so the human may lock in first safely.
+      const turn = this.state.turn;
+      this.thinking = true;
+      void this.ai
+        .decideAsync(view)
+        .catch(() => ({ cards: [] as string[], meta: { turn, cards: [], reason: "", outcome: "error" } }))
+        .then((d) => {
+          if (this.disposed || this.state.turn !== turn || this.state.phase !== "PLANNING") return;
+          this.thinking = false;
+          this.aiMeta[this.aiCommits.length] = d.meta ?? null;
+          this.commitAi(d.cards);
+          if (bothCommitted(this.state)) this.advance();
+          else this.onChange(this);
+        });
     } else {
       // Per-turn AI randomness derived from the match seed: reproducible, independent of history.
-      aiChoice = this.ai.decide(view, createSeededRng(deriveSeed(this.master, `RITARENA_AI_TURN_V1|${this.state.turn}`)));
+      this.commitAi(this.ai.decide(view, createSeededRng(deriveSeed(this.master, `RITARENA_AI_TURN_V1|${this.state.turn}`))));
     }
-    const r = commitSelection(this.state, "AI", aiChoice);
-    if (!r.ok) commitSelection(this.state, "AI", []); // defensive: never stall the match
-    this.aiCommits.push([...(this.state.commits.AI ?? [])]);
     this.deadline = Date.now() + this.timeoutMs;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.onTimeout(), this.timeoutMs);
   }
 
+  private commitAi(cards: string[]): void {
+    const r = commitSelection(this.state, "AI", cards);
+    if (!r.ok) commitSelection(this.state, "AI", []); // defensive: never stall the match
+    this.aiCommits.push([...(this.state.commits.AI ?? [])]);
+  }
+
   private onTimeout(): void {
     if (this.state.phase !== "PLANNING" || this.state.commits.HUMAN) return;
     commitSelection(this.state, "HUMAN", []); // timeout = pass (PROPOSED policy)
-    this.advance();
+    if (bothCommitted(this.state)) this.advance();
+    else this.onChange(this); // LLM still thinking: show the auto-pass now
   }
 
   private advance(): void {

@@ -2,8 +2,9 @@ import { useEffect } from "react";
 import type { Side, TurnReportView } from "../../../server/src/engine/types";
 import { ReportLines } from "./BattleLog";
 import { GameCard } from "./GameCard";
+import { RoundSummary } from "./RoundSummary";
 
-export function RevealOverlay({ report, onClose }: { report: TurnReportView; onClose: () => void }) {
+export function RevealOverlay({ report, oppName, onClose }: { report: TurnReportView; oppName: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => (e.key === "Escape" || e.key === "Enter") && onClose();
     window.addEventListener("keydown", onKey);
@@ -12,7 +13,7 @@ export function RevealOverlay({ report, onClose }: { report: TurnReportView; onC
 
   const lane = (side: Side) => (
     <div className={`reveal__lane reveal__lane--${side.toLowerCase()}`}>
-      <span className="reveal__who">{side === "AI" ? "Arena AI" : "You"}</span>
+      <span className="reveal__who">{side === "AI" ? oppName : "You"}</span>
       <div className="reveal__cards">
         {report.played[side].length === 0 ? (
           <span className="reveal__pass">Pass</span>
@@ -30,14 +31,15 @@ export function RevealOverlay({ report, onClose }: { report: TurnReportView; onC
   return (
     <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="reveal-title" onClick={onClose}>
       <div className="reveal" onClick={(e) => e.stopPropagation()}>
-        <h2 id="reveal-title" className="reveal__title">Turn {report.turn} — Reveal</h2>
+        <h2 id="reveal-title" className="reveal__title">Round {report.turn}</h2>
         {lane("AI")}
         <div className="reveal__vs">VS</div>
         {lane("HUMAN")}
-        <ReportLines report={report} />
-        <p className="reveal__hp">
-          You <strong>{Math.max(0, report.hpAfter.HUMAN)}</strong> HP · AI <strong>{Math.max(0, report.hpAfter.AI)}</strong> HP
-        </p>
+        <RoundSummary report={report} oppName={oppName} />
+        <details className="reveal__details">
+          <summary>How it resolved</summary>
+          <ReportLines report={report} oppName={oppName} />
+        </details>
         <button className="btn btn--gold" onClick={onClose} autoFocus>
           Continue
         </button>

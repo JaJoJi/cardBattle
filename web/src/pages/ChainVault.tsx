@@ -4,6 +4,7 @@ import type { ServerConfig } from "../../../server/src/protocol";
 import { WalletPanel, type WalletState } from "../components/ChainParts";
 import { usdc } from "../data/mockVault";
 import { explorerAddr, shortAddr } from "../lib/wallet";
+import { Champions, Leaderboard } from "./Champions";
 
 interface VaultSnapshot {
   enabled: boolean;
@@ -14,14 +15,11 @@ interface VaultSnapshot {
   houseSol?: number;
   houseUsdc?: number;
   liveMatches?: number;
-  stakeTiers?: number[];
   recentArenas?: { arenaId: number; state: string; stake: number; pot: number; rounds: number }[];
 }
 
-const TIER_NAMES: Record<number, string> = { 1: "Bronze", 5: "Silver", 25: "Gold", 100: "Mythic" };
-const TIER_IDS: Record<number, string> = { 1: "bronze", 5: "silver", 25: "gold", 100: "mythic" };
 
-export function ChainVault({ config, w, onEnter }: { config: ServerConfig; w: WalletState; onEnter: (stakeUsdc: number) => void }) {
+export function ChainVault({ config, w, onEnter }: { config: ServerConfig; w: WalletState; onEnter: (model: string) => void }) {
   const [snap, setSnap] = useState<VaultSnapshot | null>(null);
 
   useEffect(() => {
@@ -40,7 +38,6 @@ export function ChainVault({ config, w, onEnter }: { config: ServerConfig; w: Wa
   }, []);
 
   const houseUsdc = snap?.houseUsdc ?? 0;
-  const tiers = snap?.stakeTiers ?? [1, 5, 25, 100];
 
   return (
     <>
@@ -78,41 +75,17 @@ export function ChainVault({ config, w, onEnter }: { config: ServerConfig; w: Wa
         </div>
       </section>
 
-      <section>
-        <h2 className="section-title">Choose your stake</h2>
-        <div className="tiers">
-          {tiers.map((stake) => {
-            const payout = stake * 2 * 0.99;
-            const houseCanCover = houseUsdc >= stake;
-            return (
-              <article key={stake} className={`tier tier--${TIER_IDS[stake] ?? "bronze"}`}>
-                <span className="tier__name">{TIER_NAMES[stake] ?? `${stake} USDC`}</span>
-                <span className="tier__stake">
-                  {usdc(stake, 0)} <small>test USDC</small>
-                </span>
-                <dl className="tier__meta">
-                  <div>
-                    <dt>Win pays</dt>
-                    <dd>{usdc(payout)} USDC</dd>
-                  </div>
-                  <div>
-                    <dt>Pot</dt>
-                    <dd>2 × stake</dd>
-                  </div>
-                </dl>
-                <button className="btn btn--gold" disabled={!w.address || !houseCanCover} onClick={() => onEnter(stake)}>
-                  {!w.address ? "Connect wallet first" : houseCanCover ? "Stake & enter" : "House can't cover"}
-                </button>
-              </article>
-            );
-          })}
-        </div>
-        <p className="muted small fineprint">
-          Each match is a 1v1 RitArena arena on devnet: you and the house each stake the entry fee into on-chain escrow; the server
-          (oracle) posts a hash of every turn and finalizes the winner. 1% protocol fee · draws settle to the house · the shuffle seed
-          is committed before turn 1 and revealed at the end.
+      <Champions onChallenge={onEnter} blocked={!w.address ? "Connect wallet first" : null} />
+      <details className="fold">
+        <summary>How on-chain challenges work</summary>
+        <p className="muted small">
+          Each challenge is a 1v1 RitArena arena on devnet: you stake the fee and the house matches it from the champion's bounty, both in
+          on-chain escrow. The server posts a hash of every turn and finalizes the winner; a prize above the pot is topped up by the house.
+          The shuffle seed is committed before turn 1 and revealed at the end.
         </p>
-      </section>
+      </details>
+
+      <Leaderboard />
 
       <section>
         <h2 className="section-title">Recent house arenas</h2>

@@ -12,7 +12,17 @@ export type { ChainPhase, ChainStatus, ChainTx } from "./types";
 export type HouseLike = Pick<
   ArenaHouse,
   "publicKey" | "ensureProfile" | "createMatchArena" | "hasEntered" | "enter" | "start" | "commitRound" | "finalize" | "claim" | "cancel" | "currentRound" | "refundOwn"
->;
+> &
+  Partial<Pick<ArenaHouse, "transferUsdc">>;
+
+/** A staked challenge against an LLM champion, from an accepted price quote. */
+export interface ChallengeTerms {
+  model: string;
+  name: string;
+  aiVersion: string;
+  prizeMicro: number;
+  topUpMicro: number;
+}
 
 export const ENTRY_TIMEOUT_MS = 10 * 60_000;
 const POLL_MS = 5_000; // gentle on public RPC rate limits
@@ -79,12 +89,13 @@ export class OnChainMatch {
     restore?: OnChainSnapshot,
     private readonly vrf?: VrfLike,
     aiPrior?: PatternStats,
+    terms?: ChallengeTerms,
   ) {
     this.session = new MatchSession(
       onSessionChange,
       timeoutMs,
       { onTurnResolved: (r) => this.onTurnResolved(r) },
-      restore ? { restore: restore.session } : { start: false, aiPrior },
+      restore ? { restore: restore.session } : { start: false, aiPrior, aiVersion: terms?.aiVersion },
     );
     if (restore) {
       this.status = structuredClone(restore.status);
@@ -100,6 +111,7 @@ export class OnChainMatch {
       payoutMicro: Math.floor((stakeMicro * 2 * (10_000 - PROTOCOL_FEE_BPS)) / 10_000),
       house: house.publicKey.toBase58(),
       player: player.toBase58(),
+      ...(terms ? { opponent: { model: terms.model, name: terms.name }, prizeMicro: terms.prizeMicro, topUpMicro: terms.topUpMicro } : {}),
       seedScheme: vrf ? "vrf-v2" : "commit-reveal-v1",
       seedCommitment: vrf ? seedCommitment(this.entropy!, this.session.matchId) : this.session.seedCommitment,
       txs: [],
@@ -353,6 +365,7 @@ export class OnChainMatch {
       }
       // The result is final once finalize lands; collecting the house's pot is a separate step.
       this.status.playerMustClaim = winner === "PLAYER";
+      if (winner === "PLAYER" && (this.status.topUpMicro ?? 0) > 0) await this.payTopUp();
       if (winner === "HOUSE") {
         try {
           await this.track("House claims pot", async () => ({ sig: (await withRetry(() => this.house.claim(arenaId), 4)) ?? undefined }));
@@ -362,6 +375,20 @@ export class OnChainMatch {
       }
       this.setPhase("settled");
     });
+  }
+
+  /** Bounty top-up on a player win. Sent once: a retry could pay twice, so failures go to manual recovery. */
+  private async payTopUp(): Promise<void> {
+    const amount = this.status.topUpMicro!;
+    const label = `House pays bounty top-up (${amount / 1_000_000} USDC)`;
+    // Already attempted (sent, pending at a restart, or failed): never auto-resend.
+    if (this.status.txs.some((t) => t.label === label)) return;
+    try {
+      if (!this.house.transferUsdc) throw new Error("house cannot transfer USDC");
+      await this.track(label, async () => ({ sig: await this.house.transferUsdc!(this.player, amount) }));
+    } catch (e) {
+      this.status.error = `You won, but the bounty top-up transfer did not confirm (${errMsg(e)}). It will be checked and paid manually — your arena prize is unaffected.`;
+    }
   }
 
   private enqueue(label: string, fn: () => Promise<string | null>): void {

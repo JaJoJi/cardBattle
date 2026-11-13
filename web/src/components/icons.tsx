@@ -38,3 +38,18 @@ export const LockIcon = () => (
 
 export const TypeIcon = ({ type }: { type: CardType }) =>
   type === "ATTACK" ? <SwordIcon /> : type === "DEFENSE" ? <ShieldIcon /> : <RuneIcon />;
+export const CrownIcon = () => (
+  <svg {...base}><path d="m3 7 4.5 4L12 4l4.5 7L21 7l-2 12H5z" /><path d="M5 19h14" /></svg>
+);
+export const TrophyIcon = () => (
+  <svg {...base}><path d="M7 4h10v5a5 5 0 0 1-10 0z" /><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3" /><path d="M12 14v4M8 21h8M9 18h6" /></svg>
+);
+export const CoinIcon = () => (
+  <svg {...base}><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5.5" /><path d="M12 9.5v5" /></svg>
+);
+export const InfoIcon = () => (
+  <svg {...base}><circle cx="12" cy="12" r="9.5" /><path d="M12 11v6" /><circle cx="12" cy="7.6" r=".6" fill="currentColor" /></svg>
+);
+export const ChevronIcon = () => (
+  <svg {...base}><path d="m6 9 6 6 6-6" /></svg>
+);

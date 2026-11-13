@@ -84,7 +84,12 @@ export interface TurnReport {
   drawn: Record<Side, string[]>; // cards drawn by that side's own spells during resolution
   damage: DamageRecord[];
   heals: HealRecord[];
+  hpBefore: Record<Side, number>;
   hpAfter: Record<Side, number>;
+  /** Statuses each side received this turn (new or refreshed), as applied. */
+  statusesApplied: Record<Side, Status[]>;
+  /** Statuses still active on each side going into the next turn. */
+  statusesAfter: Record<Side, Status[]>;
 }
 
 export type Outcome = "HUMAN" | "AI" | "DRAW";
@@ -125,7 +130,10 @@ export interface TurnReportView {
   opponentDrewCount: number; // only the count of the opponent's spell draws
   damage: DamageRecord[];
   heals: HealRecord[];
+  hpBefore: Record<Side, number>;
   hpAfter: Record<Side, number>;
+  statusesApplied: Record<Side, Status[]>;
+  statusesAfter: Record<Side, Status[]>;
 }
 
 export interface PlayerView {

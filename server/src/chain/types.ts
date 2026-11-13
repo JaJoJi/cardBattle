@@ -19,6 +19,11 @@ export interface ChainStatus {
   payoutMicro: number;
   house: string;
   player: string;
+  /** The LLM champion being challenged. */
+  opponent?: { model: string; name: string };
+  /** Locked prize on a player win: the pot plus `topUpMicro` sent by the house. */
+  prizeMicro?: number;
+  topUpMicro?: number;
   /**
    * commit-reveal-v1: commitment = sha256(seed || matchId), seed revealed at the end.
    * vrf-v2: commitment = sha256(entropy || matchId) posted with the MagicBlock VRF request;

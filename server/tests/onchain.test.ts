@@ -9,6 +9,10 @@ import { canonicalDeck, DECK_VERSION } from "../src/engine/cards";
 import { RULES } from "../src/engine/rules";
 import { createMatchRngs, shuffle } from "../src/engine/rng";
 import { seedCommitment } from "../src/session";
+import { SpendGuard } from "../src/ai/llm/budget";
+import { setLlmClient } from "../src/ai/llm/llmAi";
+import { LLM_MODELS, llmVersionOf } from "../src/ai/llm/models";
+import { OpenRouterClient } from "../src/ai/llm/openrouter";
 
 /** In-memory stand-in for the RitArena program, recording every call in order. */
 class FakeHouse implements HouseLike {
@@ -96,6 +100,14 @@ class FakeHouse implements HouseLike {
   async cancel() {
     this.calls.push("cancel");
     return "sig-cancel";
+  }
+  transfers: number[] = [];
+  failTransfer = false;
+  async transferUsdc(_to: PublicKey, micro: number) {
+    this.calls.push(`transfer:${micro}`);
+    this.transfers.push(micro);
+    if (this.failTransfer) throw new Error("Transaction was not confirmed in 30.00 seconds");
+    return "sig-transfer";
   }
 }
 
@@ -290,4 +302,60 @@ describe("chain helpers", () => {
     expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
     expect(createHash("sha256").update(a).digest()).toHaveLength(32);
   });
+});
+
+describe("LLM champion challenge settlement", () => {
+  const MODEL = LLM_MODELS.find((m) => m.id.startsWith("z-ai"))!;
+  const terms = { model: MODEL.id, name: MODEL.name, aiVersion: llmVersionOf(MODEL), prizeMicro: 12_000_000, topUpMicro: 2_100_000 };
+  // The model always passes, so a human who attacks every turn wins.
+  const passer = () =>
+    new OpenRouterClient("k", new SpendGuard(1, null), (async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"cards":[],"reason":"pass"}' } }], usage: { cost: 0.0001 } }))) as typeof fetch);
+  afterEach(() => setLlmClient(null));
+
+  async function winAsPlayer(house: FakeHouse) {
+    setLlmClient(passer());
+    const player = Keypair.generate().publicKey;
+    const m = new OnChainMatch(house, player, 5_000_000, () => {}, () => {}, 60_000, undefined, undefined, undefined, terms);
+    await m.begin();
+    house.playerEntered = true;
+    await m.checkEntry();
+    for (let i = 0; i < 100 && !m.session.finished; i++) {
+      await flush();
+      const { view } = m.session.humanView();
+      if (view.self.committed) continue;
+      const atk = view.self.hand.filter((c) => c.def.type !== "DEFENSE" && c.def.cost <= view.self.energy && !c.def.effects.some((e) => e.kind === "DRAW_CARDS"));
+      m.session.commitHuman(view.turn, atk.length ? [atk.sort((a, b) => b.def.cost - a.def.cost)[0].uid] : []);
+    }
+    for (let i = 0; i < 10 && m.status.phase !== "settled"; i++) await flush();
+    return { m, player };
+  }
+
+  it("a player win is finalized to the player and the house pays the bounty top-up once", async () => {
+    const house = new FakeHouse();
+    const { m } = await winAsPlayer(house);
+    expect(m.status.phase).toBe("settled");
+    expect(m.status.winner).toBe("PLAYER");
+    expect(m.status.opponent).toEqual({ model: MODEL.id, name: MODEL.name });
+    expect(house.transfers).toEqual([2_100_000]);
+    expect(m.session.aiCostUsd()).toBeGreaterThan(0);
+
+    // A restart re-runs finalize (a no-op) but never re-sends the top-up.
+    const restored = OnChainMatch.restore(house, m.snapshot(), () => {}, () => {}, 60_000);
+    m.dispose();
+    await restored.resume();
+    for (let i = 0; i < 5; i++) await flush();
+    expect(house.transfers).toEqual([2_100_000]);
+    restored.dispose();
+  }, 20_000);
+
+  it("a top-up that fails to confirm is reported and never auto-resent", async () => {
+    const house = new FakeHouse();
+    house.failTransfer = true;
+    const { m } = await winAsPlayer(house);
+    expect(m.status.phase).toBe("settled");
+    expect(m.status.error).toMatch(/top-up/);
+    expect(house.transfers).toHaveLength(1);
+    m.dispose();
+  }, 20_000);
 });

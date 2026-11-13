@@ -16,14 +16,17 @@ export interface Challenge {
   nonce: string;
   wallet: string;
   stakeMicro: number;
+  /** The LLM champion this stake challenges (bound into the signed message). */
+  opponent?: string;
   message: string;
   expiresAt: number;
 }
 
-export function challengeMessage(wallet: string, stakeMicro: number, nonce: string, issuedAt: Date): string {
+export function challengeMessage(wallet: string, stakeMicro: number, nonce: string, issuedAt: Date, opponent?: string): string {
   return [
     "RitArena Card Battle — start a staked match",
     `Wallet: ${wallet}`,
+    ...(opponent ? [`Opponent: ${opponent}`] : []),
     `Stake: ${stakeMicro / 1_000_000} test USDC`,
     "Network: Solana devnet",
     `Nonce: ${nonce}`,
@@ -37,7 +40,7 @@ export class ChallengeStore {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  issue(wallet: string, stakeMicro: number): Challenge {
+  issue(wallet: string, stakeMicro: number, opponent?: string): Challenge {
     new PublicKey(wallet); // throws on an invalid address
     this.prune();
     const nonce = randomBytes(16).toString("hex");
@@ -45,7 +48,8 @@ export class ChallengeStore {
       nonce,
       wallet,
       stakeMicro,
-      message: challengeMessage(wallet, stakeMicro, nonce, new Date(this.now())),
+      opponent,
+      message: challengeMessage(wallet, stakeMicro, nonce, new Date(this.now()), opponent),
       expiresAt: this.now() + CHALLENGE_TTL_MS,
     };
     this.pending.set(nonce, c);
@@ -53,7 +57,7 @@ export class ChallengeStore {
   }
 
   /** Verifies and consumes a challenge. Each nonce works once, for the wallet and stake it was issued for. */
-  redeem(nonce: unknown, wallet: unknown, stakeMicro: unknown, signatureB58: unknown): { ok: true } | { ok: false; reason: string } {
+  redeem(nonce: unknown, wallet: unknown, stakeMicro: unknown, signatureB58: unknown, opponent?: string): { ok: true } | { ok: false; reason: string } {
     if (typeof nonce !== "string" || typeof wallet !== "string" || typeof signatureB58 !== "string") {
       return { ok: false, reason: "Missing wallet signature" };
     }
@@ -61,7 +65,7 @@ export class ChallengeStore {
     if (!c) return { ok: false, reason: "Unknown or already used sign-in challenge — try again" };
     this.pending.delete(nonce); // single use, even on failure
     if (this.now() > c.expiresAt) return { ok: false, reason: "Sign-in challenge expired — try again" };
-    if (c.wallet !== wallet || c.stakeMicro !== stakeMicro) return { ok: false, reason: "Challenge does not match this wallet or stake" };
+    if (c.wallet !== wallet || c.stakeMicro !== stakeMicro || c.opponent !== opponent) return { ok: false, reason: "Challenge does not match this wallet, stake or opponent" };
     let sig: Uint8Array;
     try {
       sig = bs58.decode(signatureB58);

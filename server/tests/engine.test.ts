@@ -442,3 +442,18 @@ describe("new cards", () => {
     expect(hp(s, "AI")).toBe(31);
   });
 });
+
+describe("turn report summary", () => {
+  it("records HP before/after, the statuses applied this turn, and what is still active", () => {
+    const s = makeState({ hand: ["venom_strike#1"], hp: 30 }, { hand: ["regeneration#1"], hp: 25 });
+    const r = play(s, ["venom_strike#1"], ["regeneration#1"]);
+    expect(r.hpBefore).toEqual({ HUMAN: 30, AI: 25 });
+    expect(r.hpAfter).toEqual({ HUMAN: hp(s, "HUMAN"), AI: hp(s, "AI") });
+    expect(r.statusesApplied.AI.map((x) => x.kind).sort()).toEqual(["POISON", "REGENERATION"]);
+    expect(r.statusesApplied.HUMAN).toEqual([]);
+    // Both had 3 turns and ticked once in this End phase.
+    expect(r.statusesAfter.AI).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "POISON", remaining: 2 }), expect.objectContaining({ kind: "REGENERATION", remaining: 2 })]),
+    );
+  });
+});

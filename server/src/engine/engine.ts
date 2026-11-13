@@ -124,7 +124,8 @@ function hasStatus(p: PlayerState, kind: StatusKind): Status | undefined {
 }
 
 /** Adds a status or refreshes an existing one (statuses never stack). */
-function applyStatus(p: PlayerState, status: Status): void {
+function applyStatus(p: PlayerState, status: Status, log?: Status[]): void {
+  log?.push({ ...status });
   const existing = p.statuses.find((s) => s.kind === status.kind);
   if (existing) {
     existing.remaining = Math.max(existing.remaining, status.remaining);
@@ -167,7 +168,10 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     drawn: { HUMAN: [], AI: [] },
     damage: [],
     heals: [],
+    hpBefore: { HUMAN: state.players.HUMAN.hp, AI: state.players.AI.hp },
     hpAfter: { HUMAN: 0, AI: 0 },
+    statusesApplied: { HUMAN: [], AI: [] },
+    statusesAfter: { HUMAN: [], AI: [] },
   };
   const defs = (side: Side) => commits[side].map((uid) => ({ uid, def: cardOf(uid, catalog) }));
   /** Every effect of every committed card for a side, with its source card. */
@@ -190,11 +194,11 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
       if (e.kind === "GAIN_BLOCK") {
         p.block += e.amount;
         report.blockGained[side] += e.amount;
-      } else if (e.kind === "UNBLOCKABLE_ATTACKS") applyStatus(p, { kind: "UNBLOCKABLE", remaining: e.duration });
-      else if (e.kind === "REFLECT_DAMAGE") applyStatus(p, { kind: "REFLECT", remaining: e.duration });
-      else if (e.kind === "LIFESTEAL") applyStatus(p, { kind: "LIFESTEAL", remaining: e.duration });
+      } else if (e.kind === "UNBLOCKABLE_ATTACKS") applyStatus(p, { kind: "UNBLOCKABLE", remaining: e.duration }, report.statusesApplied[side]);
+      else if (e.kind === "REFLECT_DAMAGE") applyStatus(p, { kind: "REFLECT", remaining: e.duration }, report.statusesApplied[side]);
+      else if (e.kind === "LIFESTEAL") applyStatus(p, { kind: "LIFESTEAL", remaining: e.duration }, report.statusesApplied[side]);
       else if (e.kind === "HEAL_OVER_TIME") {
-        applyStatus(p, { kind: "REGENERATION", remaining: e.duration, amount: e.amountPerTurn });
+        applyStatus(p, { kind: "REGENERATION", remaining: e.duration, amount: e.amountPerTurn }, report.statusesApplied[side]);
       }
     }
   }
@@ -254,11 +258,11 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
     }
     // Poison applies when the effect resolves, even if the damage was fully blocked.
     if (effects(attacker).some(({ e }) => e.kind === "POISON")) {
-      applyStatus(state.players[target], {
-        kind: "POISON",
-        remaining: RULES.poison.duration,
-        amount: RULES.poison.damagePerTick,
-      });
+      applyStatus(
+        state.players[target],
+        { kind: "POISON", remaining: RULES.poison.duration, amount: RULES.poison.damagePerTick },
+        report.statusesApplied[target],
+      );
     }
   }
 
@@ -315,7 +319,10 @@ export function resolveTurn(state: MatchState, rng: Rng, catalog: Catalog = CARD
   }
 
   // 13. Outcome.
-  for (const side of SIDES) report.hpAfter[side] = state.players[side].hp;
+  for (const side of SIDES) {
+    report.hpAfter[side] = state.players[side].hp;
+    report.statusesAfter[side] = state.players[side].statuses.map((s) => ({ ...s }));
+  }
   state.history.push(report);
   decideOutcome(state);
   if (state.phase !== "FINISHED") {
